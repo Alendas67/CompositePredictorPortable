@@ -56,7 +56,6 @@ st.title("🔬 Интеллектуальная система прогноза 
 
 def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_mappings,
                       feature_cols_names, numerical_stats, metrics):
-    """Сохраняет модель и метаданные, включая numerical_stats (min/max для числовых признаков)."""
     model.save(MODEL_PATH)
     metadata = {
         'scaler_x': scaler_x,
@@ -121,18 +120,16 @@ with tab1:
                 target_col = df.columns[-1]
                 all_feature_cols = df.columns[:-1].tolist()
 
-                # Разделяем на числовые и категориальные, собираем статистики для числовых
+                # Разделяем на числовые и категориальные, собираем статистики
                 numerical_cols = []
                 categorical_cols = []
                 categorical_mappings = {}
-                numerical_stats = {}   # для каждого числового признака: min, max
+                numerical_stats = {}
 
                 for col in all_feature_cols:
                     try:
-                        # Пробуем преобразовать в число – значит числовой
                         pd.to_numeric(df[col].astype(str).str.replace(',', '.'))
                         numerical_cols.append(col)
-                        # Сохраняем min/max из исходного датасета
                         numerical_stats[col] = {
                             'min': float(df[col].min()),
                             'max': float(df[col].max())
@@ -218,86 +215,56 @@ with tab1:
                 train_inputs = [X_num_train_scaled] + X_cat_train_list
                 test_inputs = [X_num_test_scaled] + X_cat_test_list
 
-                # --- Обучение с прогресс-баром, таймером, ручным управлением LR и ранней остановкой ---
-                total_epochs = 150
+                # ---------- ОБУЧЕНИЕ С КОЛБЭКАМИ И ПРОГРЕСС-БАРОМ ----------
+                total_epochs = 250
+                reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6
+                )
+                early_stop = tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss', patience=30, restore_best_weights=True
+                )
+
+                # Кастомный callback для отображения прогресса и времени
+                class ProgressCallback(tf.keras.callbacks.Callback):
+                    def __init__(self, total_epochs, progress_bar, status_text):
+                        super().__init__()
+                        self.total_epochs = total_epochs
+                        self.progress_bar = progress_bar
+                        self.status_text = status_text
+                        self.start_time = time.time()
+                        self.epoch_times = []
+                    def on_epoch_end(self, epoch, logs=None):
+                        elapsed = time.time() - self.start_time
+                        self.epoch_times.append(elapsed)
+                        avg_time = elapsed / (epoch+1)
+                        eta = avg_time * (self.total_epochs - (epoch+1))
+                        progress = (epoch+1) / self.total_epochs
+                        self.progress_bar.progress(progress, text=f"Эпоха {epoch+1}/{self.total_epochs}")
+                        self.status_text.info(
+                            f"Эпоха {epoch+1}/{self.total_epochs} | val_loss: {logs.get('val_loss', 0):.4f} | "
+                            f"val_mae: {logs.get('val_mae', 0):.4f} | Прошло: {elapsed:.1f} сек | ETA: {eta:.1f} сек"
+                        )
+
                 progress_bar = st.progress(0, text="Инициализация...")
                 status_text = st.empty()
+                progress_cb = ProgressCallback(total_epochs, progress_bar, status_text)
 
-                # Фиксируем валидационную выборку (20% от train)
-                X_train_full, X_val, y_train_full, y_val = train_test_split(
-                    train_inputs[0], y_train_scaled, test_size=0.2, random_state=42
+                history = model.fit(
+                    train_inputs, y_train_scaled,
+                    epochs=total_epochs,
+                    batch_size=32,
+                    validation_split=0.2,
+                    verbose=0,
+                    shuffle=True,
+                    callbacks=[reduce_lr, early_stop, progress_cb]
                 )
-                if len(train_inputs) > 1:
-                    val_cat = []
-                    train_cat = []
-                    for i in range(1, len(train_inputs)):
-                        tr, val = train_test_split(train_inputs[i], test_size=0.2, random_state=42)
-                        train_cat.append(tr)
-                        val_cat.append(val)
-                    train_inputs_fixed = [X_train_full] + train_cat
-                    val_inputs = [X_val] + val_cat
-                else:
-                    train_inputs_fixed = [X_train_full]
-                    val_inputs = [X_val]
 
-                best_val_loss = np.inf
-                patience_counter = 0
-                current_lr = float(model.optimizer.learning_rate.numpy())
-                history = {'loss': [], 'val_loss': [], 'mae': [], 'val_mae': []}
-
-                start_time = time.time()
-
-                for epoch in range(total_epochs):
-                    hist = model.fit(
-                        train_inputs_fixed, y_train_full,
-                        epochs=1,
-                        batch_size=32,
-                        validation_data=(val_inputs, y_val),
-                        verbose=0,
-                        shuffle=False
-                    )
-                    for key in history.keys():
-                        history[key].append(hist.history[key][0])
-
-                    progress = (epoch + 1) / total_epochs
-                    elapsed_total = time.time() - start_time
-                    if epoch > 0:
-                        avg_time_per_epoch = elapsed_total / (epoch + 1)
-                        remaining_epochs = total_epochs - (epoch + 1)
-                        eta = avg_time_per_epoch * remaining_epochs
-                        eta_str = f" | ETA: {eta:.1f} сек"
-                    else:
-                        eta_str = ""
-
-                    progress_bar.progress(progress, text=f"Эпоха {epoch+1}/{total_epochs}")
-                    status_text.info(
-                        f"Эпоха {epoch+1}/{total_epochs} | val_loss: {history['val_loss'][-1]:.4f} | "
-                        f"val_mae: {history['val_mae'][-1]:.4f} | Прошло: {elapsed_total:.1f} сек{eta_str}"
-                    )
-
-                    # ReduceLROnPlateau (patience=15, factor=0.5)
-                    if history['val_loss'][-1] < best_val_loss - 1e-7:
-                        best_val_loss = history['val_loss'][-1]
-                        patience_counter = 0
-                    else:
-                        patience_counter += 1
-                        if patience_counter >= 15 and current_lr > 1e-6:
-                            current_lr /= 2
-                            model.optimizer.learning_rate.assign(current_lr)
-                            patience_counter = 0
-                            status_text.info(f"  🔽 Learning rate уменьшен до {current_lr:.2e}")
-
-                    # EarlyStopping (patience=30)
-                    if patience_counter >= 30:
-                        status_text.warning(f"Ранняя остановка на эпохе {epoch+1}")
-                        break
-
-                elapsed_total = time.time() - start_time
+                elapsed_total = time.time() - progress_cb.start_time
                 status_text.success(
                     f"✅ Обучение завершено за {elapsed_total:.2f} секунд ({elapsed_total/60:.2f} мин)"
                 )
 
-                st.session_state['history'] = history
+                st.session_state['history'] = history.history
 
                 # Предсказание и метрики
                 y_pred_scaled = model.predict(test_inputs)
@@ -388,7 +355,6 @@ with tab1:
                 with cols[i % 3]:
                     display_name = get_display_name(col_name)
                     if col_name in categorical_mappings:
-                        # Категориальный признак
                         classes = categorical_mappings[col_name]['classes']
                         help_text = f"Допустимые значения: {', '.join(classes)}"
                         curr_val = st.session_state.get('current_inputs', {}).get(col_name, classes[0])
@@ -402,7 +368,6 @@ with tab1:
                         )
                         input_dict[col_name] = choice
                     else:
-                        # Числовой признак – подсказка с диапазоном
                         if col_name in numerical_stats:
                             min_val = numerical_stats[col_name]['min']
                             max_val = numerical_stats[col_name]['max']
@@ -418,7 +383,6 @@ with tab1:
                         )
 
             if st.form_submit_button("🧪 РАССЧИТАТЬ ПРОГНОЗ"):
-                # Подготовка входов для модели
                 X_num = np.array([[input_dict[col] for col in numerical_cols]], dtype=np.float32)
                 X_num_scaled = st.session_state['scaler_x'].transform(X_num) if numerical_cols else np.empty((1,0))
                 X_cat = []
@@ -483,7 +447,7 @@ with tab2:
     **2. Особенности модели**  
     - Категориальные признаки преобразуются в плотные векторы (Embedding размерности 8).  
     - Добавлен слой 256 нейронов, Dropout (0.4 и 0.3), GaussianNoise для устойчивости.  
-    - Используются ReduceLROnPlateau и EarlyStopping.  
+    - Используются ReduceLROnPlateau и EarlyStopping с восстановлением лучших весов.  
 
     **3. Прогнозирование**  
     - Заполните поля ввода (для категорий – выпадающие списки).  
