@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Модуль веб-приложения для прогнозирования прочности композитных материалов
-на основе нейронной сети с Embedding слоями для категориальных признаков.
-Использует Streamlit для интерактивного интерфейса.
+на основе нейронной сети с Embedding слоями, увеличенной архитектурой,
+повышенным Dropout и GaussianNoise.
 """
 
 import streamlit as st
@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, Input
-from tensorflow.keras.layers import Concatenate, Dense, Dropout, BatchNormalization
+from tensorflow.keras.layers import Concatenate, Dense, Dropout, BatchNormalization, GaussianNoise
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error
@@ -48,8 +48,8 @@ def seed_everything(seed=42):
 
 seed_everything(42)
 
-st.set_page_config(page_title="Composite Predictor Pro", layout="wide")
-st.title("🔬 Интеллектуальная система прогноза прочности (Embedding)")
+st.set_page_config(page_title="Composite Predictor Pro (Embedding + Advanced)", layout="wide")
+st.title("🔬 Интеллектуальная система прогноза прочности (Embedding, Dropout 0.4, GaussianNoise)")
 
 # ===================== ФУНКЦИИ РАБОТЫ С МОДЕЛЬЮ =====================
 
@@ -57,7 +57,7 @@ def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_map
                       feature_cols_names, metrics):
     """
     Сохраняет модель и все метаданные.
-    categorical_mappings: dict {категориальный_признак: {"classes": список_категорий, "vocab": словарь кат->индекс}}
+    categorical_mappings: dict {категориальный_признак: {"classes": список_категорий, "vocab": словарь кат->индекс, "vocab_size": int}}
     """
     model.save(MODEL_PATH)
     metadata = {
@@ -65,7 +65,7 @@ def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_map
         'scaler_y': scaler_y,
         'numerical_cols': numerical_cols,
         'categorical_mappings': categorical_mappings,
-        'feature_cols_names': feature_cols_names,  # все имена признаков (для порядка в интерфейсе)
+        'feature_cols_names': feature_cols_names,
         'metrics': metrics
     }
     with open(METADATA_PATH, 'wb') as f:
@@ -136,8 +136,7 @@ with tab1:
                         categorical_cols.append(col)
                         # Собираем уникальные категории (строки, обрезаем пробелы)
                         unique_cats = df[col].astype(str).str.strip().unique()
-                        # Сортируем для воспроизводимости
-                        unique_cats = sorted(unique_cats)
+                        unique_cats = sorted(unique_cats)  # для воспроизводимости
                         categories_lists[col] = unique_cats
                         # Создаем отображение категория -> индекс (начиная с 0)
                         vocab = {cat: idx for idx, cat in enumerate(unique_cats)}
@@ -153,7 +152,6 @@ with tab1:
                 # Категориальные признаки -> индексы
                 X_cat_list = []
                 for col in categorical_cols:
-                    # Преобразуем строки в индексы
                     vocab = categorical_mappings[col]['vocab']
                     col_data = df[col].astype(str).str.strip().map(vocab).fillna(0).astype(np.int32)
                     X_cat_list.append(col_data.values.reshape(-1, 1))
@@ -187,31 +185,33 @@ with tab1:
                 y_train_scaled = scaler_y.fit_transform(y_train)
                 y_test_scaled = scaler_y.transform(y_test)
 
-                # --- Построение модели с Embedding ---
-                # Входы
+                # ---------- ПОСТРОЕНИЕ МОДЕЛИ С УЛУЧШЕННОЙ АРХИТЕКТУРОЙ ----------
                 numerical_input = Input(shape=(len(numerical_cols),), name="numerical_input")
                 categorical_inputs = []
                 embeddings = []
                 for col in categorical_cols:
                     vocab_size = categorical_mappings[col]['vocab_size']
-                    # Размер embedding: min(50, (vocab_size+1)//2) – эмпирическое правило
-                    embed_dim = min(50, (vocab_size + 1) // 2)
+                    # Размер embedding: фиксированный 8 (можно подобрать)
+                    embed_dim = 8
                     inp = Input(shape=(1,), name=f"cat_{col}", dtype=tf.int32)
                     categorical_inputs.append(inp)
                     emb = layers.Embedding(input_dim=vocab_size, output_dim=embed_dim, name=f"embed_{col}")(inp)
                     emb = layers.Flatten()(emb)
                     embeddings.append(emb)
 
-                # Конкатенация всех признаков
                 if numerical_cols:
                     all_features = Concatenate()([numerical_input] + embeddings)
                 else:
                     all_features = Concatenate()(embeddings)
 
-                # Полносвязные слои
-                x = Dense(128, activation='relu')(all_features)
+                # Расширенная сеть с GaussianNoise, Dropout 0.4 и дополнительным слоем 256
+                x = GaussianNoise(0.05)(all_features)
+                x = Dense(256, activation='relu')(x)
                 x = BatchNormalization()(x)
-                x = Dropout(0.2)(x)
+                x = Dropout(0.4)(x)
+                x = Dense(128, activation='relu')(x)
+                x = BatchNormalization()(x)
+                x = Dropout(0.3)(x)
                 x = Dense(64, activation='relu')(x)
                 x = BatchNormalization()(x)
                 x = Dense(32, activation='relu')(x)
@@ -221,18 +221,22 @@ with tab1:
                 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
                 # Обучение
-                # Подготовка списка входов для обучения
                 train_inputs = [X_num_train_scaled] + X_cat_train_list
                 test_inputs = [X_num_test_scaled] + X_cat_test_list
 
-                with st.spinner('Обучение модели с Embedding...'):
+                # Коллбэки: снижение learning rate и ранняя остановка
+                reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6)
+                early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
+
+                with st.spinner('Обучение улучшенной модели с Embedding, Dropout 0.4, GaussianNoise...'):
                     history = model.fit(
                         train_inputs, y_train_scaled,
-                        epochs=150,
+                        epochs=250,                     # увеличенное количество эпох
                         batch_size=32,
                         validation_split=0.2,
                         verbose=0,
-                        shuffle=False
+                        shuffle=False,
+                        callbacks=[reduce_lr, early_stop]
                     )
 
                 # Предсказание и обратное масштабирование
@@ -258,7 +262,7 @@ with tab1:
                 # Сохраняем на диск
                 save_model_assets(model, scaler_x_num, scaler_y, numerical_cols,
                                   categorical_mappings, numerical_cols + categorical_cols, metrics)
-                st.sidebar.success("💾 Модель с Embedding сохранена!")
+                st.sidebar.success("💾 Модель с улучшенной архитектурой сохранена!")
 
             except Exception as e:
                 st.error(f"Ошибка при обучении: {e}")
@@ -307,7 +311,6 @@ with tab1:
             input_dict = {}
             numerical_cols = st.session_state['numerical_cols']
             categorical_mappings = st.session_state['categorical_mappings']
-            # Собираем все признаки в исходном порядке (числовые + категориальные)
             all_original_cols = st.session_state['feature_cols_names']
 
             cols = st.columns(3)
@@ -315,7 +318,7 @@ with tab1:
                 with cols[i % 3]:
                     display_name = get_display_name(col_name)
                     if col_name in categorical_mappings:
-                        # Категориальный признак: selectbox из списка классов
+                        # Категориальный признак: selectbox
                         classes = categorical_mappings[col_name]['classes']
                         help_text = f"Допустимые значения: {', '.join(classes)}"
                         curr_val = st.session_state.get('current_inputs', {}).get(col_name, classes[0])
@@ -329,12 +332,9 @@ with tab1:
                         )
                         input_dict[col_name] = choice
                     else:
-                        # Числовой признак – нужен его диапазон (из данных обучения, хранится в categorical_mappings? нет, нужно отдельно)
-                        # Для числовых диапазонов сохраним в session_state при обучении. Добавим поле stats при обучении.
-                        # Для простоты здесь используем значения по умолчанию 0, но правильнее брать из метаданных.
-                        # Чтобы не усложнять, добавим в метаданные stats при обучении. Сделаем:
-                        # В коде выше при обучении надо сохранить stats (min/max) для числовых. Добавим в save_model_assets.
-                        # Пока используем заглушку – подсказка без диапазона.
+                        # Числовой признак – запрашиваем у пользователя
+                        # Для числовых признаков можно вычислить диапазон из данных обучения (если нужно)
+                        # Для простоты оставим подсказку без диапазона
                         help_text = "Введите числовое значение"
                         default_val = float(st.session_state.get('current_inputs', {}).get(col_name, 0.0))
                         input_dict[col_name] = st.number_input(
@@ -346,23 +346,20 @@ with tab1:
 
             if st.form_submit_button("🧪 РАССЧИТАТЬ ПРОГНОЗ"):
                 # Подготовка входов для модели
-                # Числовые
                 X_num = np.array([[input_dict[col] for col in numerical_cols]], dtype=np.float32)
                 X_num_scaled = st.session_state['scaler_x'].transform(X_num) if numerical_cols else np.empty((1,0))
-                # Категориальные индексы
                 X_cat = []
                 for col in categorical_mappings.keys():
                     vocab = categorical_mappings[col]['vocab']
                     cat_str = input_dict[col].strip()
-                    idx = vocab.get(cat_str, 0)  # если не найдено, берём 0 (первая категория)
+                    idx = vocab.get(cat_str, 0)   # если не найдено – 0 (первая категория)
                     X_cat.append(np.array([[idx]], dtype=np.int32))
-                # Входы модели: [числовой массив] + список категориальных массивов
                 model_inputs = [X_num_scaled] + X_cat
                 pred_scaled = st.session_state['model'].predict(model_inputs)
                 pred = st.session_state['scaler_y'].inverse_transform(pred_scaled).item()
-                st.info(f"### Прогноз нейросети (Embedding): **{pred:.2f} МПа**")
+                st.info(f"### Прогноз нейросети (Embedding + улучшенная архитектура): **{pred:.2f} МПа**")
 
-                # Сравнение с реальным значением (если есть)
+                # Сравнение с реальным значением, если есть
                 if 'current_inputs' in st.session_state and 'raw_df' in st.session_state:
                     target_name = st.session_state['raw_df'].columns[-1]
                     if target_name in st.session_state['current_inputs']:
@@ -377,15 +374,16 @@ with tab1:
 
 # ------------------ ВКЛАДКА ПОМОЩИ --------------------
 with tab2:
-    st.header("📘 Инструкция (Embedding-модель)")
+    st.header("📘 Инструкция (Embedding + улучшенная архитектура)")
     st.markdown("""
     **1. Загрузка данных и обучение модели**  
     - В левой боковой панели загрузите CSV (последний столбец – прочность).  
     - Нажмите «🚀 Обучить новую модель».  
 
     **2. Особенности модели**  
-    - Категориальные признаки преобразуются в плотные векторы (Embedding) – это позволяет учитывать смысловые связи между категориями.  
-    - Числовые признаки нормализуются.  
+    - Категориальные признаки преобразуются в плотные векторы (Embedding размерности 8).  
+    - Добавлен слой 256 нейронов, Dropout (0.4 и 0.3), GaussianNoise для устойчивости.  
+    - Используются ReduceLROnPlateau и EarlyStopping.  
 
     **3. Прогнозирование**  
     - Заполните поля ввода (для категорий – выпадающие списки).  
