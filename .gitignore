@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Streamlit
+.streamlit/
+
+# Model files
+saved_model.keras
+model_metadata.pkl
+
+# Portable Python
+python/
+get-pip.py
+
+# Logs
+*.log
+*.tmp
+CompositePredictorPortable.rar 
+saved_model.keras 
+model_metadata.pkl 
