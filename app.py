@@ -259,11 +259,11 @@ with tab1:
                         progress = (epoch+1) / self.total_epochs
                         self.progress_bar.progress(progress, text=f"Эпоха {epoch+1}/{self.total_epochs}")
                         self.status_text.info(
-                            f"Эпоха {epoch+1}/{self.total_epochs} | val_loss: {logs.get('val_loss', 0):.4f} | "
+                            f"🏃 Эпоха {epoch+1}/{self.total_epochs} | val_loss: {logs.get('val_loss', 0):.4f} | "
                             f"val_mae: {logs.get('val_mae', 0):.4f} | Прошло: {elapsed:.1f} сек | ETA: {eta:.1f} сек"
                         )
 
-                progress_bar = st.progress(0, text="Инициализация...")
+                progress_bar = st.progress(0, text="🏃 Инициализация...")
                 status_text = st.empty()
                 progress_cb = ProgressCallback(total_epochs, progress_bar, status_text)
 
@@ -280,7 +280,7 @@ with tab1:
                 elapsed_total = time.time() - progress_cb.start_time
                 actual_epochs = len(history.history['loss'])
                 status_text.success(
-                    f"✅ Обучение завершено за {elapsed_total:.2f} сек ({elapsed_total/60:.2f} мин). "
+                    f"🏁 Обучение завершено за {elapsed_total:.2f} сек ({elapsed_total/60:.2f} мин). "
                     f"Выполнено эпох: {actual_epochs} из {total_epochs}"
                 )
                 st.session_state['history'] = history.history
