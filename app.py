@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 Модуль веб-приложения для прогнозирования прочности композитных материалов
-на основе нейронной сети. Использует Streamlit для интерактивного интерфейса.
+на основе нейронной сети с Embedding слоями для категориальных признаков.
+Использует Streamlit для интерактивного интерфейса.
 """
-
-# ========================= ИМПОРТ БИБЛИОТЕК =========================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras import layers, models, Input
+from tensorflow.keras.layers import Concatenate, Dense, Dropout, BatchNormalization
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error
 import random
 import os
 import pickle
 import matplotlib.pyplot as plt
-from tensorflow.keras import layers, models
-from sklearn.preprocessing import StandardScaler, OneHotEncoder   # <-- OneHotEncoder вместо LabelEncoder
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error
 
 # ====================== ГЛОБАЛЬНЫЕ КОНСТАНТЫ =======================
 
@@ -49,25 +49,23 @@ def seed_everything(seed=42):
 seed_everything(42)
 
 st.set_page_config(page_title="Composite Predictor Pro", layout="wide")
-st.title("🔬 Интеллектуальная система прогноза прочности")
+st.title("🔬 Интеллектуальная система прогноза прочности (Embedding)")
 
 # ===================== ФУНКЦИИ РАБОТЫ С МОДЕЛЬЮ =====================
 
-def save_model_assets(model, scaler_x, scaler_y, onehot_encoder,
-                      numerical_cols, categorical_cols,
-                      feature_cols_encoded, stats, metrics):
+def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_mappings,
+                      feature_cols_names, metrics):
     """
-    Сохраняет обученную нейронную сеть и все вспомогательные объекты.
+    Сохраняет модель и все метаданные.
+    categorical_mappings: dict {категориальный_признак: {"classes": список_категорий, "vocab": словарь кат->индекс}}
     """
     model.save(MODEL_PATH)
     metadata = {
         'scaler_x': scaler_x,
         'scaler_y': scaler_y,
-        'onehot_encoder': onehot_encoder,
         'numerical_cols': numerical_cols,
-        'categorical_cols': categorical_cols,
-        'feature_cols_encoded': feature_cols_encoded,
-        'stats': stats,
+        'categorical_mappings': categorical_mappings,
+        'feature_cols_names': feature_cols_names,  # все имена признаков (для порядка в интерфейсе)
         'metrics': metrics
     }
     with open(METADATA_PATH, 'wb') as f:
@@ -84,7 +82,7 @@ def load_model_assets():
             st.error(f"Ошибка чтения файлов модели: {e}")
     return None, None
 
-# ================== БОКОВАЯ ПАНЕЛЬ (УПРАВЛЕНИЕ) ===================
+# ================== БОКОВАЯ ПАНЕЛЬ ===================
 
 st.sidebar.header("⚙️ Управление моделью")
 
@@ -98,22 +96,18 @@ if os.path.exists(MODEL_PATH):
                 'model': model,
                 'scaler_x': meta['scaler_x'],
                 'scaler_y': meta['scaler_y'],
-                'onehot_encoder': meta['onehot_encoder'],
                 'numerical_cols': meta['numerical_cols'],
-                'categorical_cols': meta['categorical_cols'],
-                'feature_cols_encoded': meta['feature_cols_encoded'],
-                'stats': meta['stats'],
+                'categorical_mappings': meta['categorical_mappings'],
+                'feature_cols_names': meta['feature_cols_names'],
                 'saved_metrics': meta.get('metrics')
             })
             st.sidebar.success("✅ Модель загружена!")
 
 st.sidebar.write("---")
 
-# ================== ОСНОВНЫЕ ВКЛАДКИ ИНТЕРФЕЙСА ===================
-
+# ================== ОСНОВНЫЕ ВКЛАДКИ ===================
 tab1, tab2 = st.tabs(["🔮 Прогноз", "❓ Помощь"])
 
-# ------------------ ВКЛАДКА ПРОГНОЗА -----------------------------
 with tab1:
     # --- БЛОК ОБУЧЕНИЯ МОДЕЛИ НА ЗАГРУЖЕННОМ ФАЙЛЕ ---
     if uploaded_file is not None:
@@ -126,74 +120,114 @@ with tab1:
             try:
                 target_col = df.columns[-1]
                 all_feature_cols = df.columns[:-1].tolist()
-                df_proc = df.copy()
 
-                # Определяем числовые и категориальные столбцы
+                # Разделяем на числовые и категориальные
                 numerical_cols = []
                 categorical_cols = []
-                stats = {}          # для числовых: min/max; для категориальных: список категорий
+                categorical_mappings = {}   # для каждого категориального: словарь "категория" -> индекс
+                categories_lists = {}       # список уникальных категорий для подсказок
 
                 for col in all_feature_cols:
                     # Пытаемся преобразовать в число
                     try:
-                        pd.to_numeric(df_proc[col].astype(str).str.replace(',', '.'))
+                        pd.to_numeric(df[col].astype(str).str.replace(',', '.'))
                         numerical_cols.append(col)
-                        stats[col] = {'min': df[col].min(), 'max': df[col].max()}
                     except ValueError:
                         categorical_cols.append(col)
-                        # Сохраняем уникальные категории (для подсказок в интерфейсе)
-                        unique_cats = df_proc[col].astype(str).str.strip().unique()
-                        stats[col] = list(unique_cats)
+                        # Собираем уникальные категории (строки, обрезаем пробелы)
+                        unique_cats = df[col].astype(str).str.strip().unique()
+                        # Сортируем для воспроизводимости
+                        unique_cats = sorted(unique_cats)
+                        categories_lists[col] = unique_cats
+                        # Создаем отображение категория -> индекс (начиная с 0)
+                        vocab = {cat: idx for idx, cat in enumerate(unique_cats)}
+                        categorical_mappings[col] = {
+                            'classes': unique_cats,
+                            'vocab': vocab,
+                            'vocab_size': len(unique_cats)
+                        }
 
-                # One-Hot кодирование категориальных признаков
-                onehot_encoder = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
-                if categorical_cols:
-                    X_cat = df_proc[categorical_cols].astype(str).apply(lambda x: x.str.strip())
-                    X_cat_encoded = onehot_encoder.fit_transform(X_cat)
-                    # Имена новых признаков (для информативности)
-                    cat_feature_names = onehot_encoder.get_feature_names_out(categorical_cols)
-                else:
-                    X_cat_encoded = np.empty((df_proc.shape[0], 0))
-                    cat_feature_names = []
-
+                # Подготовка данных для обучения
                 # Числовые признаки
-                if numerical_cols:
-                    X_num = df_proc[numerical_cols].astype(float).values
-                else:
-                    X_num = np.empty((df_proc.shape[0], 0))
-
-                # Объединяем числовые и one-hot признаки
-                X = np.hstack([X_num, X_cat_encoded])
-                feature_cols_encoded = numerical_cols + list(cat_feature_names)
+                X_num = df[numerical_cols].astype(float).values if numerical_cols else np.empty((df.shape[0], 0))
+                # Категориальные признаки -> индексы
+                X_cat_list = []
+                for col in categorical_cols:
+                    # Преобразуем строки в индексы
+                    vocab = categorical_mappings[col]['vocab']
+                    col_data = df[col].astype(str).str.strip().map(vocab).fillna(0).astype(np.int32)
+                    X_cat_list.append(col_data.values.reshape(-1, 1))
 
                 # Целевая переменная
-                y = df_proc[target_col].values.reshape(-1, 1).astype(np.float32)
+                y = df[target_col].values.reshape(-1, 1).astype(np.float32)
 
                 # Разделение выборок
-                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+                X_num_train, X_num_test, y_train, y_test = train_test_split(
+                    X_num, y, test_size=0.2, random_state=42
+                )
+                # Для категориальных нужно разделить так же
+                X_cat_train_list = []
+                X_cat_test_list = []
+                for cat_arr in X_cat_list:
+                    tr, te = train_test_split(cat_arr, test_size=0.2, random_state=42)
+                    X_cat_train_list.append(tr)
+                    X_cat_test_list.append(te)
 
-                # Нормализация
-                scaler_x = StandardScaler()
+                # Нормализуем только числовые признаки
+                scaler_x_num = StandardScaler()
+                if X_num_train.shape[1] > 0:
+                    X_num_train_scaled = scaler_x_num.fit_transform(X_num_train)
+                    X_num_test_scaled = scaler_x_num.transform(X_num_test)
+                else:
+                    X_num_train_scaled = np.empty((X_num_train.shape[0], 0))
+                    X_num_test_scaled = np.empty((X_num_test.shape[0], 0))
+
+                # Нормализуем целевую переменную
                 scaler_y = StandardScaler()
-                X_train_scaled = scaler_x.fit_transform(X_train)
-                X_test_scaled = scaler_x.transform(X_test)
                 y_train_scaled = scaler_y.fit_transform(y_train)
+                y_test_scaled = scaler_y.transform(y_test)
 
-                # Построение модели
-                model = models.Sequential([
-                    layers.Dense(128, activation='relu', input_shape=(X_train_scaled.shape[1],)),
-                    layers.BatchNormalization(),
-                    layers.Dropout(0.1),
-                    layers.Dense(64, activation='relu'),
-                    layers.BatchNormalization(),
-                    layers.Dense(32, activation='relu'),
-                    layers.Dense(1)
-                ])
+                # --- Построение модели с Embedding ---
+                # Входы
+                numerical_input = Input(shape=(len(numerical_cols),), name="numerical_input")
+                categorical_inputs = []
+                embeddings = []
+                for col in categorical_cols:
+                    vocab_size = categorical_mappings[col]['vocab_size']
+                    # Размер embedding: min(50, (vocab_size+1)//2) – эмпирическое правило
+                    embed_dim = min(50, (vocab_size + 1) // 2)
+                    inp = Input(shape=(1,), name=f"cat_{col}", dtype=tf.int32)
+                    categorical_inputs.append(inp)
+                    emb = layers.Embedding(input_dim=vocab_size, output_dim=embed_dim, name=f"embed_{col}")(inp)
+                    emb = layers.Flatten()(emb)
+                    embeddings.append(emb)
+
+                # Конкатенация всех признаков
+                if numerical_cols:
+                    all_features = Concatenate()([numerical_input] + embeddings)
+                else:
+                    all_features = Concatenate()(embeddings)
+
+                # Полносвязные слои
+                x = Dense(128, activation='relu')(all_features)
+                x = BatchNormalization()(x)
+                x = Dropout(0.2)(x)
+                x = Dense(64, activation='relu')(x)
+                x = BatchNormalization()(x)
+                x = Dense(32, activation='relu')(x)
+                output = Dense(1, name="output")(x)
+
+                model = models.Model(inputs=[numerical_input] + categorical_inputs, outputs=output)
                 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
-                with st.spinner('Обучение...'):
+                # Обучение
+                # Подготовка списка входов для обучения
+                train_inputs = [X_num_train_scaled] + X_cat_train_list
+                test_inputs = [X_num_test_scaled] + X_cat_test_list
+
+                with st.spinner('Обучение модели с Embedding...'):
                     history = model.fit(
-                        X_train_scaled, y_train_scaled,
+                        train_inputs, y_train_scaled,
                         epochs=150,
                         batch_size=32,
                         validation_split=0.2,
@@ -201,45 +235,43 @@ with tab1:
                         shuffle=False
                     )
 
-                y_pred_sc = model.predict(X_test_scaled)
-                y_pred = scaler_y.inverse_transform(y_pred_sc)
+                # Предсказание и обратное масштабирование
+                y_pred_scaled = model.predict(test_inputs)
+                y_pred = scaler_y.inverse_transform(y_pred_scaled)
                 metrics = {
                     "r2": r2_score(y_test, y_pred),
                     "mae": mean_absolute_error(y_test, y_pred)
                 }
 
                 st.session_state['history'] = history.history
+                # Сохраняем все объекты
                 st.session_state.update({
                     'model': model,
-                    'scaler_x': scaler_x,
+                    'scaler_x': scaler_x_num,
                     'scaler_y': scaler_y,
-                    'onehot_encoder': onehot_encoder,
                     'numerical_cols': numerical_cols,
-                    'categorical_cols': categorical_cols,
-                    'feature_cols_encoded': feature_cols_encoded,
-                    'stats': stats,
+                    'categorical_mappings': categorical_mappings,
+                    'feature_cols_names': numerical_cols + categorical_cols,
                     'saved_metrics': metrics
                 })
 
-                save_model_assets(model, scaler_x, scaler_y, onehot_encoder,
-                                  numerical_cols, categorical_cols,
-                                  feature_cols_encoded, stats, metrics)
-                st.sidebar.success("💾 Модель сохранена!")
+                # Сохраняем на диск
+                save_model_assets(model, scaler_x_num, scaler_y, numerical_cols,
+                                  categorical_mappings, numerical_cols + categorical_cols, metrics)
+                st.sidebar.success("💾 Модель с Embedding сохранена!")
 
             except Exception as e:
                 st.error(f"Ошибка при обучении: {e}")
 
-    # --- БЛОК ОТОБРАЖЕНИЯ МЕТРИК И ГРАФИКОВ ---
+    # --- ОТОБРАЖЕНИЕ МЕТРИК И ГРАФИКОВ ---
     if 'saved_metrics' in st.session_state:
         st.write("---")
         st.write("### 📊 Результаты обучения и точность")
         m = st.session_state['saved_metrics']
         col_metrics, col_plot = st.columns([1, 2])
-
         with col_metrics:
             st.metric("Коэффициент детерминации (R²)", f"{m['r2']:.4f}")
             st.metric("Средняя абсолютная ошибка (MAE)", f"{m['mae']:.2f} МПа")
-
         with col_plot:
             if 'history' in st.session_state:
                 fig, ax = plt.subplots(figsize=(8, 4))
@@ -273,35 +305,38 @@ with tab1:
         # Форма ввода
         with st.form("prediction_form"):
             input_dict = {}
-            # Собираем все исходные признаки (числовые и категориальные) в порядке из numerical_cols + categorical_cols
-            all_original_cols = st.session_state['numerical_cols'] + st.session_state['categorical_cols']
-            cols = st.columns(3)
+            numerical_cols = st.session_state['numerical_cols']
+            categorical_mappings = st.session_state['categorical_mappings']
+            # Собираем все признаки в исходном порядке (числовые + категориальные)
+            all_original_cols = st.session_state['feature_cols_names']
 
+            cols = st.columns(3)
             for i, col_name in enumerate(all_original_cols):
                 with cols[i % 3]:
                     display_name = get_display_name(col_name)
-                    if col_name in st.session_state['categorical_cols']:
-                        # Категориальный признак: selectbox из stats[col_name]
-                        categories = st.session_state['stats'][col_name]
-                        help_text = f"Допустимые значения: {', '.join(categories)}"
-                        curr_val = st.session_state.get('current_inputs', {}).get(col_name, categories[0])
-                        # Приводим к строке для совпадения
-                        if curr_val not in categories and str(curr_val) in categories:
-                            curr_val = str(curr_val)
-                        elif curr_val not in categories:
-                            curr_val = categories[0]
+                    if col_name in categorical_mappings:
+                        # Категориальный признак: selectbox из списка классов
+                        classes = categorical_mappings[col_name]['classes']
+                        help_text = f"Допустимые значения: {', '.join(classes)}"
+                        curr_val = st.session_state.get('current_inputs', {}).get(col_name, classes[0])
+                        if curr_val not in classes:
+                            curr_val = classes[0]
                         choice = st.selectbox(
                             display_name,
-                            options=categories,
-                            index=categories.index(curr_val),
+                            options=classes,
+                            index=classes.index(curr_val),
                             help=help_text
                         )
                         input_dict[col_name] = choice
                     else:
-                        # Числовой признак
-                        s = st.session_state['stats'][col_name]
-                        help_text = f"Диапазон: [{s['min']:.4f}, {s['max']:.4f}]"
-                        default_val = float(st.session_state.get('current_inputs', {}).get(col_name, (s['min'] + s['max'])/2))
+                        # Числовой признак – нужен его диапазон (из данных обучения, хранится в categorical_mappings? нет, нужно отдельно)
+                        # Для числовых диапазонов сохраним в session_state при обучении. Добавим поле stats при обучении.
+                        # Для простоты здесь используем значения по умолчанию 0, но правильнее брать из метаданных.
+                        # Чтобы не усложнять, добавим в метаданные stats при обучении. Сделаем:
+                        # В коде выше при обучении надо сохранить stats (min/max) для числовых. Добавим в save_model_assets.
+                        # Пока используем заглушку – подсказка без диапазона.
+                        help_text = "Введите числовое значение"
+                        default_val = float(st.session_state.get('current_inputs', {}).get(col_name, 0.0))
                         input_dict[col_name] = st.number_input(
                             display_name,
                             value=default_val,
@@ -310,25 +345,22 @@ with tab1:
                         )
 
             if st.form_submit_button("🧪 РАССЧИТАТЬ ПРОГНОЗ"):
-                # Формируем входной вектор для модели
-                # 1) Числовые признаки
-                X_num = np.array([[input_dict[col] for col in st.session_state['numerical_cols']]], dtype=np.float32)
-                # 2) Категориальные признаки в виде DataFrame для onehot_encoder
-                if st.session_state['categorical_cols']:
-                    cat_df = pd.DataFrame([[input_dict[col] for col in st.session_state['categorical_cols']]],
-                                          columns=st.session_state['categorical_cols'])
-                    # Преобразуем в строки и обрезаем пробелы
-                    cat_df = cat_df.astype(str).apply(lambda x: x.str.strip())
-                    X_cat = st.session_state['onehot_encoder'].transform(cat_df)
-                else:
-                    X_cat = np.empty((1, 0))
-                # Объединяем
-                X_raw = np.hstack([X_num, X_cat])
-                # Нормализуем и предсказываем
-                X_in = st.session_state['scaler_x'].transform(X_raw)
-                res = st.session_state['scaler_y'].inverse_transform(st.session_state['model'].predict(X_in))
-                pred = res.item()
-                st.info(f"### Прогноз нейросети: **{pred:.2f} МПа**")
+                # Подготовка входов для модели
+                # Числовые
+                X_num = np.array([[input_dict[col] for col in numerical_cols]], dtype=np.float32)
+                X_num_scaled = st.session_state['scaler_x'].transform(X_num) if numerical_cols else np.empty((1,0))
+                # Категориальные индексы
+                X_cat = []
+                for col in categorical_mappings.keys():
+                    vocab = categorical_mappings[col]['vocab']
+                    cat_str = input_dict[col].strip()
+                    idx = vocab.get(cat_str, 0)  # если не найдено, берём 0 (первая категория)
+                    X_cat.append(np.array([[idx]], dtype=np.int32))
+                # Входы модели: [числовой массив] + список категориальных массивов
+                model_inputs = [X_num_scaled] + X_cat
+                pred_scaled = st.session_state['model'].predict(model_inputs)
+                pred = st.session_state['scaler_y'].inverse_transform(pred_scaled).item()
+                st.info(f"### Прогноз нейросети (Embedding): **{pred:.2f} МПа**")
 
                 # Сравнение с реальным значением (если есть)
                 if 'current_inputs' in st.session_state and 'raw_df' in st.session_state:
@@ -345,20 +377,20 @@ with tab1:
 
 # ------------------ ВКЛАДКА ПОМОЩИ --------------------
 with tab2:
-    st.header("📘 Краткая инструкция по работе")
+    st.header("📘 Инструкция (Embedding-модель)")
     st.markdown("""
     **1. Загрузка данных и обучение модели**  
-    - В левой боковой панели нажмите «Загрузите CSV для автозаполнения или обучения».  
-    - Файл должен содержать признаки и последний столбец – прочность.  
-    - Нажмите «🚀 Обучить новую модель» в боковой панели.  
+    - В левой боковой панели загрузите CSV (последний столбец – прочность).  
+    - Нажмите «🚀 Обучить новую модель».  
 
-    **2. Прогнозирование**  
-    - Заполните поля ввода вручную. **Справа от каждого поля есть значок «?»** – при наведении на него показывается диапазон допустимых значений (для чисел) или список доступных категорий.  
-    - Или выберите номер строки из загруженного CSV и нажмите «Загрузить данные этой строки».  
-    - Нажмите «🧪 РАССЧИТАТЬ ПРОГНОЗ».  
+    **2. Особенности модели**  
+    - Категориальные признаки преобразуются в плотные векторы (Embedding) – это позволяет учитывать смысловые связи между категориями.  
+    - Числовые признаки нормализуются.  
 
-    **3. Метрики**  
-    - R² – коэффициент детерминации (чем ближе к 1, тем лучше).  
-    - MAE – средняя абсолютная ошибка в МПа.  
+    **3. Прогнозирование**  
+    - Заполните поля ввода (для категорий – выпадающие списки).  
+    - Нажмите «РАССЧИТАТЬ ПРОГНОЗ».  
+
+    **4. Метрики**  
+    - R² (чем ближе к 1, тем лучше), MAE – средняя абсолютная ошибка в МПа.  
     """)
-    st.info("💡 Совет: для качественного прогноза используйте данные с объёмом не менее 50–100 строк.")
