@@ -55,7 +55,7 @@ st.title("🔬 Интеллектуальная система прогноза 
 # ===================== ФУНКЦИИ РАБОТЫ С МОДЕЛЬЮ =====================
 
 def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_mappings,
-                      feature_cols_names, numerical_stats, metrics):
+                      feature_cols_names, numerical_stats, metrics, actual_epochs, training_time):
     model.save(MODEL_PATH)
     metadata = {
         'scaler_x': scaler_x,
@@ -64,7 +64,9 @@ def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_map
         'categorical_mappings': categorical_mappings,
         'feature_cols_names': feature_cols_names,
         'numerical_stats': numerical_stats,
-        'metrics': metrics
+        'metrics': metrics,
+        'actual_epochs': actual_epochs,
+        'training_time': training_time
     }
     with open(METADATA_PATH, 'wb') as f:
         pickle.dump(metadata, f)
@@ -235,7 +237,7 @@ with tab1:
                 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
                 # ---------- ОБУЧЕНИЕ ----------
-                total_epochs = 150
+                total_epochs = 250
                 reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
                     monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6
                 )
@@ -306,7 +308,7 @@ with tab1:
 
                 save_model_assets(model, scaler_x_num, scaler_y, numerical_cols,
                                   categorical_mappings, numerical_cols + categorical_cols,
-                                  numerical_stats, metrics)
+                                  numerical_stats, metrics, actual_epochs, elapsed_total)
                 st.sidebar.success("💾 Модель сохранена!")
 
             except Exception as e:
@@ -321,11 +323,12 @@ with tab1:
         with col_metrics:
             st.metric("Коэффициент детерминации (R²)", f"{m['r2']:.4f}")
             st.metric("Средняя абсолютная ошибка (MAE)", f"{m['mae']:.2f} МПа")
-            # Дополнительная информация
             actual_epochs = st.session_state.get('actual_epochs', '—')
             training_time = st.session_state.get('training_time', None)
             if training_time is not None:
-                st.caption(f"Обучено за {actual_epochs} эпох | Время: {training_time:.2f} сек ({training_time/60:.2f} мин)")
+                st.metric("⏱️ Обучение", f"{actual_epochs} эпох", delta=f"{training_time:.1f} сек")
+            else:
+                st.metric("⏱️ Обучение", f"{actual_epochs} эпох")
         with col_plot:
             if 'history' in st.session_state:
                 fig, ax = plt.subplots(figsize=(8, 4))
