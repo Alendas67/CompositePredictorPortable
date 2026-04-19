@@ -235,7 +235,7 @@ with tab1:
                 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
                 # ---------- ОБУЧЕНИЕ ----------
-                total_epochs = 250
+                total_epochs = 150
                 reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
                     monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6
                 )
