@@ -104,6 +104,10 @@ if os.path.exists(MODEL_PATH):
 
 st.sidebar.write("---")
 
+# ================== ИНИЦИАЛИЗАЦИЯ СЧЁТЧИКА ЗАГРУЗОК =================
+if 'load_counter' not in st.session_state:
+    st.session_state['load_counter'] = 0
+
 # ================== ОСНОВНЫЕ ВКЛАДКИ ===================
 tab1, tab2 = st.tabs(["🔮 Прогноз", "❓ Помощь"])
 
@@ -162,7 +166,7 @@ with tab1:
                 X_cat_train_list = []
                 X_cat_test_list = []
                 for cat_arr in X_cat_list:
-                    tr, te = train_test_split(cat_arr, test_size=0.2, random_state=42)
+                    tr, te = train_test_split(cat_arr, test_size=0.2, random_state=Quintal)
                     X_cat_train_list.append(tr)
                     X_cat_test_list.append(te)
 
@@ -180,8 +184,7 @@ with tab1:
                 y_train_scaled = scaler_y.fit_transform(y_train)
                 y_test_scaled = scaler_y.transform(y_test)
 
-                # ---------- ФИКСИРОВАННАЯ ВАЛИДАЦИОННАЯ ВЫБОРКА (20% от обучающей) ----------
-                # Разделяем обучение и валидацию
+                # Фиксированная валидационная выборка (20% от обучающей)
                 X_num_train, X_num_val, y_train_scaled, y_val = train_test_split(
                     X_num_train_scaled, y_train_scaled, test_size=0.2, random_state=42
                 )
@@ -192,7 +195,6 @@ with tab1:
                     X_cat_train_fixed.append(tr)
                     X_cat_val_list.append(val)
 
-                # Собираем входы для модели
                 train_inputs_fixed = [X_num_train] + X_cat_train_fixed
                 val_inputs = [X_num_val] + X_cat_val_list
                 test_inputs = [X_num_test_scaled] + X_cat_test_list
@@ -230,7 +232,7 @@ with tab1:
                 model = models.Model(inputs=[numerical_input] + categorical_inputs, outputs=output)
                 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
-                # ---------- ОБУЧЕНИЕ С КОЛБЭКАМИ И ПРОГРЕСС-БАРОМ ----------
+                # ---------- ОБУЧЕНИЕ ----------
                 total_epochs = 250
                 reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
                     monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6
@@ -239,7 +241,6 @@ with tab1:
                     monitor='val_loss', patience=30, restore_best_weights=True
                 )
 
-                # Кастомный callback для отображения прогресса и времени
                 class ProgressCallback(tf.keras.callbacks.Callback):
                     def __init__(self, total_epochs, progress_bar, status_text):
                         super().__init__()
@@ -247,10 +248,8 @@ with tab1:
                         self.progress_bar = progress_bar
                         self.status_text = status_text
                         self.start_time = time.time()
-                        self.epoch_times = []
                     def on_epoch_end(self, epoch, logs=None):
                         elapsed = time.time() - self.start_time
-                        self.epoch_times.append(elapsed)
                         avg_time = elapsed / (epoch+1)
                         eta = avg_time * (self.total_epochs - (epoch+1))
                         progress = (epoch+1) / self.total_epochs
@@ -275,10 +274,7 @@ with tab1:
                 )
 
                 elapsed_total = time.time() - progress_cb.start_time
-                status_text.success(
-                    f"✅ Обучение завершено за {elapsed_total:.2f} секунд ({elapsed_total/60:.2f} мин)"
-                )
-
+                status_text.success(f"✅ Обучение завершено за {elapsed_total:.2f} сек ({elapsed_total/60:.2f} мин)")
                 st.session_state['history'] = history.history
 
                 # Предсказание и метрики
@@ -303,7 +299,7 @@ with tab1:
                 save_model_assets(model, scaler_x_num, scaler_y, numerical_cols,
                                   categorical_mappings, numerical_cols + categorical_cols,
                                   numerical_stats, metrics)
-                st.sidebar.success("💾 Модель с улучшенной архитектурой сохранена!")
+                st.sidebar.success("💾 Модель сохранена!")
 
             except Exception as e:
                 st.error(f"Ошибка при обучении: {e}")
@@ -343,17 +339,20 @@ with tab1:
                 max_value=len(st.session_state['raw_df'])-1,
                 value=0
             )
+            # Кнопка загрузки – увеличивает счётчик и обновляет current_inputs
             if st.button("Загрузить данные этой строки"):
                 st.session_state['current_inputs'] = st.session_state['raw_df'].iloc[row_idx].to_dict()
+                st.session_state['load_counter'] += 1
                 st.rerun()
 
-        # Форма ввода с изменённым порядком полей и подсказками
+        # Форма ввода с динамическими ключами
         with st.form("prediction_form"):
             input_dict = {}
             numerical_cols = st.session_state['numerical_cols']
             categorical_mappings = st.session_state['categorical_mappings']
             numerical_stats = st.session_state.get('numerical_stats', {})
             all_original_cols = st.session_state['feature_cols_names']
+            load_counter = st.session_state.get('load_counter', 0)
 
             # Приоритетные поля
             priority_fields = ['fiber_type', 'resin_type']
@@ -379,7 +378,8 @@ with tab1:
                             display_name,
                             options=classes,
                             index=classes.index(curr_val),
-                            help=help_text
+                            help=help_text,
+                            key=f"cat_{col_name}_{load_counter}"   # динамический ключ
                         )
                         input_dict[col_name] = choice
                     else:
@@ -394,10 +394,12 @@ with tab1:
                             display_name,
                             value=default_val,
                             format="%.4f",
-                            help=help_text
+                            help=help_text,
+                            key=f"num_{col_name}_{load_counter}"   # динамический ключ
                         )
 
             if st.form_submit_button("🧪 РАССЧИТАТЬ ПРОГНОЗ"):
+                # Подготовка входов для модели
                 X_num = np.array([[input_dict[col] for col in numerical_cols]], dtype=np.float32)
                 X_num_scaled = st.session_state['scaler_x'].transform(X_num) if numerical_cols else np.empty((1,0))
                 X_cat = []
@@ -409,9 +411,9 @@ with tab1:
                 model_inputs = [X_num_scaled] + X_cat
                 pred_scaled = st.session_state['model'].predict(model_inputs)
                 pred = st.session_state['scaler_y'].inverse_transform(pred_scaled).item()
-                st.info(f"### Прогноз нейросети (Embedding + улучшенная архитектура): **{pred:.2f} МПа**")
+                st.info(f"### Прогноз нейросети: **{pred:.2f} МПа**")
 
-                # Проверка наличия комбинации признаков в датасете
+                # Проверка наличия комбинации в датасете
                 show_comparison = False
                 actual_value = None
                 if 'raw_df' in st.session_state:
@@ -453,21 +455,20 @@ with tab1:
 
 # ------------------ ВКЛАДКА ПОМОЩИ --------------------
 with tab2:
-    st.header("📘 Инструкция (Embedding + улучшенная архитектура)")
+    st.header("📘 Инструкция")
     st.markdown("""
     **1. Загрузка данных и обучение модели**  
     - В левой боковой панели загрузите CSV (последний столбец – прочность).  
     - Нажмите «🚀 Обучить новую модель».  
 
     **2. Особенности модели**  
-    - Категориальные признаки преобразуются в плотные векторы (Embedding размерности 8).  
-    - Добавлен слой 256 нейронов, Dropout (0.4 и 0.3), GaussianNoise для устойчивости.  
-    - Используются ReduceLROnPlateau и EarlyStopping с восстановлением лучших весов.  
-    - **Фиксированная валидационная выборка** – гарантирует воспроизводимость результатов.  
+    - Категориальные признаки → Embedding (размерность 8).  
+    - Слои: 256, 128, 64, 32 нейрона, BatchNorm, Dropout(0.4/0.3), GaussianNoise.  
+    - ReduceLROnPlateau, EarlyStopping с восстановлением лучших весов.  
 
     **3. Прогнозирование**  
-    - Заполните поля ввода (для категорий – выпадающие списки).  
-    - Нажмите «РАССЧИТАТЬ ПРОГНОЗ».  
+    - Заполните поля вручную или выберите строку из датасета и нажмите «Загрузить данные этой строки».  
+    - После ручного изменения полей можно снова загрузить исходные данные строки – кнопка загрузки сбросит все поля.  
 
     **4. Метрики**  
     - R² (чем ближе к 1, тем лучше), MAE – средняя абсолютная ошибка в МПа.  
