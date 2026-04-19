@@ -155,7 +155,7 @@ with tab1:
 
                 y = df[target_col].values.reshape(-1, 1).astype(np.float32)
 
-                # Разделение выборок
+                # Разделение на обучающую (80%) и тестовую (20%)
                 X_num_train, X_num_test, y_train, y_test = train_test_split(
                     X_num, y, test_size=0.2, random_state=42
                 )
@@ -166,7 +166,7 @@ with tab1:
                     X_cat_train_list.append(tr)
                     X_cat_test_list.append(te)
 
-                # Нормализация
+                # Нормализация числовых признаков
                 scaler_x_num = StandardScaler()
                 if X_num_train.shape[1] > 0:
                     X_num_train_scaled = scaler_x_num.fit_transform(X_num_train)
@@ -175,9 +175,27 @@ with tab1:
                     X_num_train_scaled = np.empty((X_num_train.shape[0], 0))
                     X_num_test_scaled = np.empty((X_num_test.shape[0], 0))
 
+                # Нормализация целевой переменной
                 scaler_y = StandardScaler()
                 y_train_scaled = scaler_y.fit_transform(y_train)
                 y_test_scaled = scaler_y.transform(y_test)
+
+                # ---------- ФИКСИРОВАННАЯ ВАЛИДАЦИОННАЯ ВЫБОРКА (20% от обучающей) ----------
+                # Разделяем обучение и валидацию
+                X_num_train, X_num_val, y_train_scaled, y_val = train_test_split(
+                    X_num_train_scaled, y_train_scaled, test_size=0.2, random_state=42
+                )
+                X_cat_val_list = []
+                X_cat_train_fixed = []
+                for cat_arr in X_cat_train_list:
+                    tr, val = train_test_split(cat_arr, test_size=0.2, random_state=42)
+                    X_cat_train_fixed.append(tr)
+                    X_cat_val_list.append(val)
+
+                # Собираем входы для модели
+                train_inputs_fixed = [X_num_train] + X_cat_train_fixed
+                val_inputs = [X_num_val] + X_cat_val_list
+                test_inputs = [X_num_test_scaled] + X_cat_test_list
 
                 # ---------- ПОСТРОЕНИЕ МОДЕЛИ ----------
                 numerical_input = Input(shape=(len(numerical_cols),), name="numerical_input")
@@ -211,9 +229,6 @@ with tab1:
 
                 model = models.Model(inputs=[numerical_input] + categorical_inputs, outputs=output)
                 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
-
-                train_inputs = [X_num_train_scaled] + X_cat_train_list
-                test_inputs = [X_num_test_scaled] + X_cat_test_list
 
                 # ---------- ОБУЧЕНИЕ С КОЛБЭКАМИ И ПРОГРЕСС-БАРОМ ----------
                 total_epochs = 250
@@ -250,10 +265,10 @@ with tab1:
                 progress_cb = ProgressCallback(total_epochs, progress_bar, status_text)
 
                 history = model.fit(
-                    train_inputs, y_train_scaled,
+                    train_inputs_fixed, y_train_scaled,
+                    validation_data=(val_inputs, y_val),
                     epochs=total_epochs,
                     batch_size=32,
-                    validation_split=0.2,
                     verbose=0,
                     shuffle=True,
                     callbacks=[reduce_lr, early_stop, progress_cb]
@@ -448,6 +463,7 @@ with tab2:
     - Категориальные признаки преобразуются в плотные векторы (Embedding размерности 8).  
     - Добавлен слой 256 нейронов, Dropout (0.4 и 0.3), GaussianNoise для устойчивости.  
     - Используются ReduceLROnPlateau и EarlyStopping с восстановлением лучших весов.  
+    - **Фиксированная валидационная выборка** – гарантирует воспроизводимость результатов.  
 
     **3. Прогнозирование**  
     - Заполните поля ввода (для категорий – выпадающие списки).  
