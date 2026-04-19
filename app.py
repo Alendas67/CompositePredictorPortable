@@ -209,7 +209,7 @@ with tab1:
                 test_inputs = [X_num_test_scaled] + X_cat_test_list
 
                 # --- Обучение с прогресс-баром, таймером, ручным управлением LR и ранней остановкой ---
-                total_epochs = 150
+                total_epochs = 250
                 progress_bar = st.progress(0, text="Инициализация...")
                 status_text = st.empty()
 
