@@ -124,21 +124,18 @@ with tab1:
                 # Разделяем на числовые и категориальные
                 numerical_cols = []
                 categorical_cols = []
-                categorical_mappings = {}   # для каждого категориального: словарь "категория" -> индекс
-                categories_lists = {}       # список уникальных категорий для подсказок
+                categorical_mappings = {}
+                categories_lists = {}
 
                 for col in all_feature_cols:
-                    # Пытаемся преобразовать в число
                     try:
                         pd.to_numeric(df[col].astype(str).str.replace(',', '.'))
                         numerical_cols.append(col)
                     except ValueError:
                         categorical_cols.append(col)
-                        # Собираем уникальные категории (строки, обрезаем пробелы)
                         unique_cats = df[col].astype(str).str.strip().unique()
-                        unique_cats = sorted(unique_cats)  # для воспроизводимости
+                        unique_cats = sorted(unique_cats)
                         categories_lists[col] = unique_cats
-                        # Создаем отображение категория -> индекс (начиная с 0)
                         vocab = {cat: idx for idx, cat in enumerate(unique_cats)}
                         categorical_mappings[col] = {
                             'classes': unique_cats,
@@ -147,23 +144,18 @@ with tab1:
                         }
 
                 # Подготовка данных для обучения
-                # Числовые признаки
                 X_num = df[numerical_cols].astype(float).values if numerical_cols else np.empty((df.shape[0], 0))
-                # Категориальные признаки -> индексы
                 X_cat_list = []
                 for col in categorical_cols:
                     vocab = categorical_mappings[col]['vocab']
                     col_data = df[col].astype(str).str.strip().map(vocab).fillna(0).astype(np.int32)
                     X_cat_list.append(col_data.values.reshape(-1, 1))
 
-                # Целевая переменная
                 y = df[target_col].values.reshape(-1, 1).astype(np.float32)
 
-                # Разделение выборок
                 X_num_train, X_num_test, y_train, y_test = train_test_split(
                     X_num, y, test_size=0.2, random_state=42
                 )
-                # Для категориальных нужно разделить так же
                 X_cat_train_list = []
                 X_cat_test_list = []
                 for cat_arr in X_cat_list:
@@ -171,7 +163,6 @@ with tab1:
                     X_cat_train_list.append(tr)
                     X_cat_test_list.append(te)
 
-                # Нормализуем только числовые признаки
                 scaler_x_num = StandardScaler()
                 if X_num_train.shape[1] > 0:
                     X_num_train_scaled = scaler_x_num.fit_transform(X_num_train)
@@ -180,18 +171,16 @@ with tab1:
                     X_num_train_scaled = np.empty((X_num_train.shape[0], 0))
                     X_num_test_scaled = np.empty((X_num_test.shape[0], 0))
 
-                # Нормализуем целевую переменную
                 scaler_y = StandardScaler()
                 y_train_scaled = scaler_y.fit_transform(y_train)
                 y_test_scaled = scaler_y.transform(y_test)
 
-                # ---------- ПОСТРОЕНИЕ МОДЕЛИ С УЛУЧШЕННОЙ АРХИТЕКТУРОЙ ----------
+                # ---------- ПОСТРОЕНИЕ МОДЕЛИ ----------
                 numerical_input = Input(shape=(len(numerical_cols),), name="numerical_input")
                 categorical_inputs = []
                 embeddings = []
                 for col in categorical_cols:
                     vocab_size = categorical_mappings[col]['vocab_size']
-                    # Размер embedding: фиксированный 8 (можно подобрать)
                     embed_dim = 8
                     inp = Input(shape=(1,), name=f"cat_{col}", dtype=tf.int32)
                     categorical_inputs.append(inp)
@@ -204,7 +193,6 @@ with tab1:
                 else:
                     all_features = Concatenate()(embeddings)
 
-                # Расширенная сеть с GaussianNoise, Dropout 0.4 и дополнительным слоем 256
                 x = GaussianNoise(0.05)(all_features)
                 x = Dense(256, activation='relu')(x)
                 x = BatchNormalization()(x)
@@ -220,18 +208,16 @@ with tab1:
                 model = models.Model(inputs=[numerical_input] + categorical_inputs, outputs=output)
                 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
-                # Обучение
                 train_inputs = [X_num_train_scaled] + X_cat_train_list
                 test_inputs = [X_num_test_scaled] + X_cat_test_list
 
-                # Коллбэки: снижение learning rate и ранняя остановка
                 reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6)
                 early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
 
                 with st.spinner('Обучение улучшенной модели с Embedding, Dropout 0.4, GaussianNoise...'):
                     history = model.fit(
                         train_inputs, y_train_scaled,
-                        epochs=150,                     # увеличенное количество эпох
+                        epochs=150,
                         batch_size=32,
                         validation_split=0.2,
                         verbose=0,
@@ -239,7 +225,6 @@ with tab1:
                         callbacks=[reduce_lr, early_stop]
                     )
 
-                # Предсказание и обратное масштабирование
                 y_pred_scaled = model.predict(test_inputs)
                 y_pred = scaler_y.inverse_transform(y_pred_scaled)
                 metrics = {
@@ -248,7 +233,6 @@ with tab1:
                 }
 
                 st.session_state['history'] = history.history
-                # Сохраняем все объекты
                 st.session_state.update({
                     'model': model,
                     'scaler_x': scaler_x_num,
@@ -259,7 +243,6 @@ with tab1:
                     'saved_metrics': metrics
                 })
 
-                # Сохраняем на диск
                 save_model_assets(model, scaler_x_num, scaler_y, numerical_cols,
                                   categorical_mappings, numerical_cols + categorical_cols, metrics)
                 st.sidebar.success("💾 Модель с улучшенной архитектурой сохранена!")
@@ -306,19 +289,31 @@ with tab1:
                 st.session_state['current_inputs'] = st.session_state['raw_df'].iloc[row_idx].to_dict()
                 st.rerun()
 
-        # Форма ввода
+        # Форма ввода (с изменённым порядком полей)
         with st.form("prediction_form"):
             input_dict = {}
             numerical_cols = st.session_state['numerical_cols']
             categorical_mappings = st.session_state['categorical_mappings']
             all_original_cols = st.session_state['feature_cols_names']
 
+            # --- НОВЫЙ ПОРЯДОК ОТОБРАЖЕНИЯ: сначала fiber_type и resin_type, затем остальные ---
+            priority_fields = ['fiber_type', 'resin_type']
+            ordered_fields = []
+            # Добавляем приоритетные поля, если они есть в all_original_cols
+            for field in priority_fields:
+                if field in all_original_cols:
+                    ordered_fields.append(field)
+            # Добавляем остальные поля в том порядке, как они идут в all_original_cols (но без уже добавленных)
+            for field in all_original_cols:
+                if field not in ordered_fields:
+                    ordered_fields.append(field)
+
+            # Разбиваем на три колонки
             cols = st.columns(3)
-            for i, col_name in enumerate(all_original_cols):
+            for i, col_name in enumerate(ordered_fields):
                 with cols[i % 3]:
                     display_name = get_display_name(col_name)
                     if col_name in categorical_mappings:
-                        # Категориальный признак: selectbox
                         classes = categorical_mappings[col_name]['classes']
                         help_text = f"Допустимые значения: {', '.join(classes)}"
                         curr_val = st.session_state.get('current_inputs', {}).get(col_name, classes[0])
@@ -332,7 +327,6 @@ with tab1:
                         )
                         input_dict[col_name] = choice
                     else:
-                        # Числовой признак – запрашиваем у пользователя
                         help_text = "Введите числовое значение"
                         default_val = float(st.session_state.get('current_inputs', {}).get(col_name, 0.0))
                         input_dict[col_name] = st.number_input(
@@ -350,37 +344,30 @@ with tab1:
                 for col in categorical_mappings.keys():
                     vocab = categorical_mappings[col]['vocab']
                     cat_str = input_dict[col].strip()
-                    idx = vocab.get(cat_str, 0)   # если не найдено – 0 (первая категория)
+                    idx = vocab.get(cat_str, 0)
                     X_cat.append(np.array([[idx]], dtype=np.int32))
                 model_inputs = [X_num_scaled] + X_cat
                 pred_scaled = st.session_state['model'].predict(model_inputs)
                 pred = st.session_state['scaler_y'].inverse_transform(pred_scaled).item()
                 st.info(f"### Прогноз нейросети (Embedding + улучшенная архитектура): **{pred:.2f} МПа**")
 
-                # ----- ПРОВЕРКА НАЛИЧИЯ КОМБИНАЦИИ ПРИЗНАКОВ В ДАТАСЕТЕ -----
+                # Проверка наличия комбинации в датасете
                 show_comparison = False
                 actual_value = None
-
                 if 'raw_df' in st.session_state:
                     df_raw = st.session_state['raw_df']
                     target_col_name = df_raw.columns[-1]
-                    # Все признаки, кроме целевого (порядок может отличаться)
                     feature_cols_for_match = st.session_state['feature_cols_names']
-
-                    # Перебираем строки датасета
                     for idx, row in df_raw.iterrows():
                         match = True
                         for col in feature_cols_for_match:
                             val_from_row = row[col]
                             val_from_input = input_dict[col]
-
                             if col in categorical_mappings:
-                                # Категориальное сравнение строк
                                 if str(val_from_row).strip() != str(val_from_input).strip():
                                     match = False
                                     break
                             else:
-                                # Числовое сравнение с допуском
                                 try:
                                     if abs(float(val_from_row) - float(val_from_input)) > 1e-5:
                                         match = False
