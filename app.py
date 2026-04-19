@@ -398,9 +398,9 @@ with tab1:
             actual_epochs = st.session_state.get('actual_epochs', '—')
             training_time = st.session_state.get('training_time', None)
             if training_time is not None:
-                st.metric("⏱️ Обучение", f"{actual_epochs} эпох", delta=f"{training_time:.1f} сек")
+                st.metric("⏱️ Обучение", f"{actual_epochs} эпохи", delta=f"{training_time:.1f} сек")
             else:
-                st.metric("⏱️ Обучение", f"{actual_epochs} эпох")
+                st.metric("⏱️ Обучение", f"{actual_epochs} эпохи")
         with col_plot:
             if 'history' in st.session_state:
                 fig, ax = plt.subplots(figsize=(8, 4))
