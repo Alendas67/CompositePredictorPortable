@@ -18,7 +18,7 @@ import random
 import os
 import pickle
 import matplotlib.pyplot as plt
-import time   # <--- ДОБАВЛЕН ДЛЯ ТАЙМЕРА
+import time
 
 # ====================== ГЛОБАЛЬНЫЕ КОНСТАНТЫ =======================
 
@@ -55,7 +55,8 @@ st.title("🔬 Интеллектуальная система прогноза 
 # ===================== ФУНКЦИИ РАБОТЫ С МОДЕЛЬЮ =====================
 
 def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_mappings,
-                      feature_cols_names, metrics):
+                      feature_cols_names, numerical_stats, metrics):
+    """Сохраняет модель и метаданные, включая numerical_stats (min/max для числовых признаков)."""
     model.save(MODEL_PATH)
     metadata = {
         'scaler_x': scaler_x,
@@ -63,6 +64,7 @@ def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_map
         'numerical_cols': numerical_cols,
         'categorical_mappings': categorical_mappings,
         'feature_cols_names': feature_cols_names,
+        'numerical_stats': numerical_stats,
         'metrics': metrics
     }
     with open(METADATA_PATH, 'wb') as f:
@@ -96,6 +98,7 @@ if os.path.exists(MODEL_PATH):
                 'numerical_cols': meta['numerical_cols'],
                 'categorical_mappings': meta['categorical_mappings'],
                 'feature_cols_names': meta['feature_cols_names'],
+                'numerical_stats': meta.get('numerical_stats', {}),
                 'saved_metrics': meta.get('metrics')
             })
             st.sidebar.success("✅ Модель загружена!")
@@ -118,15 +121,22 @@ with tab1:
                 target_col = df.columns[-1]
                 all_feature_cols = df.columns[:-1].tolist()
 
-                # Разделяем на числовые и категориальные
+                # Разделяем на числовые и категориальные, собираем статистики для числовых
                 numerical_cols = []
                 categorical_cols = []
                 categorical_mappings = {}
+                numerical_stats = {}   # для каждого числового признака: min, max
 
                 for col in all_feature_cols:
                     try:
+                        # Пробуем преобразовать в число – значит числовой
                         pd.to_numeric(df[col].astype(str).str.replace(',', '.'))
                         numerical_cols.append(col)
+                        # Сохраняем min/max из исходного датасета
+                        numerical_stats[col] = {
+                            'min': float(df[col].min()),
+                            'max': float(df[col].max())
+                        }
                     except ValueError:
                         categorical_cols.append(col)
                         unique_cats = df[col].astype(str).str.strip().unique()
@@ -209,7 +219,7 @@ with tab1:
                 test_inputs = [X_num_test_scaled] + X_cat_test_list
 
                 # --- Обучение с прогресс-баром, таймером, ручным управлением LR и ранней остановкой ---
-                total_epochs = 250
+                total_epochs = 150
                 progress_bar = st.progress(0, text="Инициализация...")
                 status_text = st.empty()
 
@@ -235,11 +245,9 @@ with tab1:
                 current_lr = float(model.optimizer.learning_rate.numpy())
                 history = {'loss': [], 'val_loss': [], 'mae': [], 'val_mae': []}
 
-                # ЗАПУСК ТАЙМЕРА
                 start_time = time.time()
 
                 for epoch in range(total_epochs):
-                    epoch_start = time.time()
                     hist = model.fit(
                         train_inputs_fixed, y_train_full,
                         epochs=1,
@@ -253,7 +261,6 @@ with tab1:
 
                     progress = (epoch + 1) / total_epochs
                     elapsed_total = time.time() - start_time
-                    # Оценочное оставшееся время
                     if epoch > 0:
                         avg_time_per_epoch = elapsed_total / (epoch + 1)
                         remaining_epochs = total_epochs - (epoch + 1)
@@ -285,7 +292,6 @@ with tab1:
                         status_text.warning(f"Ранняя остановка на эпохе {epoch+1}")
                         break
 
-                # Окончание таймера
                 elapsed_total = time.time() - start_time
                 status_text.success(
                     f"✅ Обучение завершено за {elapsed_total:.2f} секунд ({elapsed_total/60:.2f} мин)"
@@ -308,11 +314,13 @@ with tab1:
                     'numerical_cols': numerical_cols,
                     'categorical_mappings': categorical_mappings,
                     'feature_cols_names': numerical_cols + categorical_cols,
+                    'numerical_stats': numerical_stats,
                     'saved_metrics': metrics
                 })
 
                 save_model_assets(model, scaler_x_num, scaler_y, numerical_cols,
-                                  categorical_mappings, numerical_cols + categorical_cols, metrics)
+                                  categorical_mappings, numerical_cols + categorical_cols,
+                                  numerical_stats, metrics)
                 st.sidebar.success("💾 Модель с улучшенной архитектурой сохранена!")
 
             except Exception as e:
@@ -357,11 +365,12 @@ with tab1:
                 st.session_state['current_inputs'] = st.session_state['raw_df'].iloc[row_idx].to_dict()
                 st.rerun()
 
-        # Форма ввода с изменённым порядком полей
+        # Форма ввода с изменённым порядком полей и подсказками
         with st.form("prediction_form"):
             input_dict = {}
             numerical_cols = st.session_state['numerical_cols']
             categorical_mappings = st.session_state['categorical_mappings']
+            numerical_stats = st.session_state.get('numerical_stats', {})
             all_original_cols = st.session_state['feature_cols_names']
 
             # Приоритетные поля
@@ -379,6 +388,7 @@ with tab1:
                 with cols[i % 3]:
                     display_name = get_display_name(col_name)
                     if col_name in categorical_mappings:
+                        # Категориальный признак
                         classes = categorical_mappings[col_name]['classes']
                         help_text = f"Допустимые значения: {', '.join(classes)}"
                         curr_val = st.session_state.get('current_inputs', {}).get(col_name, classes[0])
@@ -392,7 +402,13 @@ with tab1:
                         )
                         input_dict[col_name] = choice
                     else:
-                        help_text = "Введите числовое значение"
+                        # Числовой признак – подсказка с диапазоном
+                        if col_name in numerical_stats:
+                            min_val = numerical_stats[col_name]['min']
+                            max_val = numerical_stats[col_name]['max']
+                            help_text = f"Введите числовое значение (диапазон: [{min_val:.4f}, {max_val:.4f}])"
+                        else:
+                            help_text = "Введите числовое значение"
                         default_val = float(st.session_state.get('current_inputs', {}).get(col_name, 0.0))
                         input_dict[col_name] = st.number_input(
                             display_name,
