@@ -98,7 +98,9 @@ if os.path.exists(MODEL_PATH):
                 'categorical_mappings': meta['categorical_mappings'],
                 'feature_cols_names': meta['feature_cols_names'],
                 'numerical_stats': meta.get('numerical_stats', {}),
-                'saved_metrics': meta.get('metrics')
+                'saved_metrics': meta.get('metrics'),
+                'actual_epochs': meta.get('actual_epochs'),
+                'training_time': meta.get('training_time')
             })
             st.sidebar.success("✅ Модель загружена!")
 
@@ -166,7 +168,7 @@ with tab1:
                 X_cat_train_list = []
                 X_cat_test_list = []
                 for cat_arr in X_cat_list:
-                    tr, te = train_test_split(cat_arr, test_size=0.2, random_state=Quintal)
+                    tr, te = train_test_split(cat_arr, test_size=0.2, random_state=42)
                     X_cat_train_list.append(tr)
                     X_cat_test_list.append(te)
 
@@ -274,8 +276,14 @@ with tab1:
                 )
 
                 elapsed_total = time.time() - progress_cb.start_time
-                status_text.success(f"✅ Обучение завершено за {elapsed_total:.2f} сек ({elapsed_total/60:.2f} мин)")
+                actual_epochs = len(history.history['loss'])
+                status_text.success(
+                    f"✅ Обучение завершено за {elapsed_total:.2f} сек ({elapsed_total/60:.2f} мин). "
+                    f"Выполнено эпох: {actual_epochs} из {total_epochs}"
+                )
                 st.session_state['history'] = history.history
+                st.session_state['actual_epochs'] = actual_epochs
+                st.session_state['training_time'] = elapsed_total
 
                 # Предсказание и метрики
                 y_pred_scaled = model.predict(test_inputs)
@@ -313,6 +321,11 @@ with tab1:
         with col_metrics:
             st.metric("Коэффициент детерминации (R²)", f"{m['r2']:.4f}")
             st.metric("Средняя абсолютная ошибка (MAE)", f"{m['mae']:.2f} МПа")
+            # Дополнительная информация
+            actual_epochs = st.session_state.get('actual_epochs', '—')
+            training_time = st.session_state.get('training_time', None)
+            if training_time is not None:
+                st.caption(f"Обучено за {actual_epochs} эпох | Время: {training_time:.2f} сек ({training_time/60:.2f} мин)")
         with col_plot:
             if 'history' in st.session_state:
                 fig, ax = plt.subplots(figsize=(8, 4))
@@ -339,13 +352,12 @@ with tab1:
                 max_value=len(st.session_state['raw_df'])-1,
                 value=0
             )
-            # Кнопка загрузки – увеличивает счётчик и обновляет current_inputs
             if st.button("Загрузить данные этой строки"):
                 st.session_state['current_inputs'] = st.session_state['raw_df'].iloc[row_idx].to_dict()
                 st.session_state['load_counter'] += 1
                 st.rerun()
 
-        # Форма ввода с динамическими ключами
+        # Форма ввода с динамическими ключами (для сброса)
         with st.form("prediction_form"):
             input_dict = {}
             numerical_cols = st.session_state['numerical_cols']
@@ -354,7 +366,7 @@ with tab1:
             all_original_cols = st.session_state['feature_cols_names']
             load_counter = st.session_state.get('load_counter', 0)
 
-            # Приоритетные поля
+            # Приоритетные поля: fiber_type, resin_type
             priority_fields = ['fiber_type', 'resin_type']
             ordered_fields = []
             for field in priority_fields:
@@ -379,7 +391,7 @@ with tab1:
                             options=classes,
                             index=classes.index(curr_val),
                             help=help_text,
-                            key=f"cat_{col_name}_{load_counter}"   # динамический ключ
+                            key=f"cat_{col_name}_{load_counter}"
                         )
                         input_dict[col_name] = choice
                     else:
@@ -395,7 +407,7 @@ with tab1:
                             value=default_val,
                             format="%.4f",
                             help=help_text,
-                            key=f"num_{col_name}_{load_counter}"   # динамический ключ
+                            key=f"num_{col_name}_{load_counter}"
                         )
 
             if st.form_submit_button("🧪 РАССЧИТАТЬ ПРОГНОЗ"):
