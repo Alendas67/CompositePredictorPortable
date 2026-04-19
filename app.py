@@ -231,7 +231,7 @@ with tab1:
                 with st.spinner('Обучение улучшенной модели с Embedding, Dropout 0.4, GaussianNoise...'):
                     history = model.fit(
                         train_inputs, y_train_scaled,
-                        epochs=250,                     # увеличенное количество эпох
+                        epochs=150,                     # увеличенное количество эпох
                         batch_size=32,
                         validation_split=0.2,
                         verbose=0,
