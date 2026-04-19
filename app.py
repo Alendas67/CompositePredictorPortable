@@ -231,7 +231,7 @@ with tab1:
 
                 best_val_loss = np.inf
                 patience_counter = 0
-                current_lr = 0.001
+                current_lr = float(model.optimizer.learning_rate.numpy())   # начальное значение
                 history = {'loss': [], 'val_loss': [], 'mae': [], 'val_mae': []}
 
                 for epoch in range(total_epochs):
@@ -258,7 +258,7 @@ with tab1:
                         patience_counter += 1
                         if patience_counter >= 15 and current_lr > 1e-6:
                             current_lr /= 2
-                            tf.keras.backend.set_value(model.optimizer.lr, current_lr)
+                            model.optimizer.learning_rate.assign(current_lr)
                             patience_counter = 0
                             status_text.info(f"  🔽 Learning rate уменьшен до {current_lr:.2e}")
 
