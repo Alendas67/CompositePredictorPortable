@@ -18,6 +18,7 @@ import random
 import os
 import pickle
 import matplotlib.pyplot as plt
+import time   # <--- ДОБАВЛЕН ДЛЯ ТАЙМЕРА
 
 # ====================== ГЛОБАЛЬНЫЕ КОНСТАНТЫ =======================
 
@@ -207,8 +208,8 @@ with tab1:
                 train_inputs = [X_num_train_scaled] + X_cat_train_list
                 test_inputs = [X_num_test_scaled] + X_cat_test_list
 
-                # --- Обучение с прогресс-баром и ручным управлением LR и ранней остановкой ---
-                total_epochs = 250
+                # --- Обучение с прогресс-баром, таймером, ручным управлением LR и ранней остановкой ---
+                total_epochs = 150
                 progress_bar = st.progress(0, text="Инициализация...")
                 status_text = st.empty()
 
@@ -231,10 +232,14 @@ with tab1:
 
                 best_val_loss = np.inf
                 patience_counter = 0
-                current_lr = float(model.optimizer.learning_rate.numpy())   # начальное значение
+                current_lr = float(model.optimizer.learning_rate.numpy())
                 history = {'loss': [], 'val_loss': [], 'mae': [], 'val_mae': []}
 
+                # ЗАПУСК ТАЙМЕРА
+                start_time = time.time()
+
                 for epoch in range(total_epochs):
+                    epoch_start = time.time()
                     hist = model.fit(
                         train_inputs_fixed, y_train_full,
                         epochs=1,
@@ -247,8 +252,21 @@ with tab1:
                         history[key].append(hist.history[key][0])
 
                     progress = (epoch + 1) / total_epochs
+                    elapsed_total = time.time() - start_time
+                    # Оценочное оставшееся время
+                    if epoch > 0:
+                        avg_time_per_epoch = elapsed_total / (epoch + 1)
+                        remaining_epochs = total_epochs - (epoch + 1)
+                        eta = avg_time_per_epoch * remaining_epochs
+                        eta_str = f" | ETA: {eta:.1f} сек"
+                    else:
+                        eta_str = ""
+
                     progress_bar.progress(progress, text=f"Эпоха {epoch+1}/{total_epochs}")
-                    status_text.info(f"Эпоха {epoch+1}/{total_epochs} | val_loss: {history['val_loss'][-1]:.4f} | val_mae: {history['val_mae'][-1]:.4f}")
+                    status_text.info(
+                        f"Эпоха {epoch+1}/{total_epochs} | val_loss: {history['val_loss'][-1]:.4f} | "
+                        f"val_mae: {history['val_mae'][-1]:.4f} | Прошло: {elapsed_total:.1f} сек{eta_str}"
+                    )
 
                     # ReduceLROnPlateau (patience=15, factor=0.5)
                     if history['val_loss'][-1] < best_val_loss - 1e-7:
@@ -266,6 +284,12 @@ with tab1:
                     if patience_counter >= 30:
                         status_text.warning(f"Ранняя остановка на эпохе {epoch+1}")
                         break
+
+                # Окончание таймера
+                elapsed_total = time.time() - start_time
+                status_text.success(
+                    f"✅ Обучение завершено за {elapsed_total:.2f} секунд ({elapsed_total/60:.2f} мин)"
+                )
 
                 st.session_state['history'] = history
 
