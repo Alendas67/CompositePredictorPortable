@@ -49,8 +49,8 @@ def seed_everything(seed=42):
 
 seed_everything(42)
 
-st.set_page_config(page_title="Composite Predictor Pro (Embedding + Advanced)", layout="wide")
-st.title("🔬 Интеллектуальная система прогноза прочности (Embedding, Dropout 0.4, GaussianNoise)")
+st.set_page_config(page_title="Composite Predictor Pro", layout="wide")
+st.title("🔬 Интеллектуальная система прогноза прочности")
 
 # ===================== ФУНКЦИИ РАБОТЫ С МОДЕЛЬЮ =====================
 
@@ -464,7 +464,7 @@ with tab1:
                     c_b.write(f"❌ Абсолютная ошибка: **{abs_err:.2f} МПа**")
                     c_c.write(f"📉 Отклонение: **{(abs_err/actual_value)*100:.2f}%**")
                 else:
-                    st.warning("⚠️ Для данной комбинации значений признаков отсутствует экспериментальное значение Прочности. Метрики качества прогноза не могут быть определены!")
+                    st.warning("⚠️ Для данной комбинации значений признаков отсутствует экспериментальное значение ПРОЧНОСТИ. Метрики качества прогноза не могут быть определены!")
 
                 st.balloons()
 
