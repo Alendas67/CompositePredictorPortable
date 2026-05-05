@@ -1,6 +1,5 @@
 @echo off
 cd /d "%~dp0"
-start http://localhost:8501
-timeout /t 2 /nobreak >nul
-.\python\Scripts\streamlit.exe run app.py
+echo Running from: %cd%
+.\python\python.exe -m streamlit run app.py
 pause

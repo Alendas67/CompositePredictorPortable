@@ -10,6 +10,9 @@
 - Отображение метрик (R², MAE) и графиков обучения
 - Интерфейс для прогнозирования с возможностью автозаполнения из датасета
 - Подробную справку о модели и гиперпараметрах
+- Подсветку принадлежности строки к обучающей/тестовой выборке
+- Корректную индикацию качества прогноза в зависимости от типа строки
+- Чекбокс для скрытия строк из обучающей выборки (показывать только тестовые)
 """
 
 import streamlit as st
@@ -63,26 +66,14 @@ seed_everything(42)
 
 # Настройка страницы Streamlit: заголовок вкладки браузера и широкий макет
 st.set_page_config(page_title="Composite Predictor Pro", layout="wide")
-st.title("🔬 Интеллектуальная система прогноза прочности ")
+st.title("🔬 Интеллектуальная система прогноза прочности композитов")
 
 # ===================== ФУНКЦИИ РАБОТЫ С МОДЕЛЬЮ =====================
 
 def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_mappings,
-                      feature_cols_names, numerical_stats, metrics, actual_epochs, training_time):
+                      feature_cols_names, numerical_stats, metrics, actual_epochs, training_time, df_train_indices=None, df_test_indices=None):
     """
     Сохраняет обученную нейронную сеть и все вспомогательные объекты в файлы.
-    
-    Параметры:
-    - model: обученная модель Keras
-    - scaler_x: StandardScaler для нормализации входных признаков
-    - scaler_y: StandardScaler для нормализации целевой переменной
-    - numerical_cols: список числовых признаков
-    - categorical_mappings: словарь с отображениями для категориальных признаков
-    - feature_cols_names: полный список признаков (числовые + категориальные)
-    - numerical_stats: словарь с min/max для числовых признаков (для подсказок в интерфейсе)
-    - metrics: словарь с метриками качества (R², MAE)
-    - actual_epochs: реальное количество эпох, которое отработала модель (до ранней остановки)
-    - training_time: общее время обучения в секундах
     """
     model.save(MODEL_PATH)
     metadata = {
@@ -94,7 +85,9 @@ def save_model_assets(model, scaler_x, scaler_y, numerical_cols, categorical_map
         'numerical_stats': numerical_stats,
         'metrics': metrics,
         'actual_epochs': actual_epochs,
-        'training_time': training_time
+        'training_time': training_time,
+        'df_train_indices': df_train_indices,   # сохраняем индексы обучающей выборки
+        'df_test_indices': df_test_indices      # сохраняем индексы тестовой выборки
     }
     with open(METADATA_PATH, 'wb') as f:
         pickle.dump(metadata, f)
@@ -134,7 +127,9 @@ if os.path.exists(MODEL_PATH):
                 'numerical_stats': meta.get('numerical_stats', {}),
                 'saved_metrics': meta.get('metrics'),
                 'actual_epochs': meta.get('actual_epochs'),
-                'training_time': meta.get('training_time')
+                'training_time': meta.get('training_time'),
+                'df_train_indices': meta.get('df_train_indices'),
+                'df_test_indices': meta.get('df_test_indices')
             })
             st.sidebar.success("✅ Модель загружена!")
 
@@ -147,7 +142,7 @@ if 'load_counter' not in st.session_state:
     st.session_state['load_counter'] = 0
 
 # ================== ОСНОВНЫЕ ВКЛАДКИ ИНТЕРФЕЙСА ===================
-tab1, tab2, tab3 = st.tabs(["🔮 Прогноз", "❓ Помощь", "📘 Справка"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔮 Прогноз", "❓ Помощь", "📘 Справка", "📊 Анализ данных"])
 
 with tab1:
     # --- БЛОК ОБУЧЕНИЯ МОДЕЛИ НА ЗАГРУЖЕННОМ ФАЙЛЕ ---
@@ -177,47 +172,64 @@ with tab1:
                     try:
                         pd.to_numeric(df[col].astype(str).str.replace(',', '.'))
                         numerical_cols.append(col)
-                        # Сохраняем min и max для числового признака (из исходных данных)
-                        numerical_stats[col] = {
-                            'min': float(df[col].min()),
-                            'max': float(df[col].max())
-                        }
                     except ValueError:
                         # Если не получается, значит категориальный признак
                         categorical_cols.append(col)
-                        unique_cats = df[col].astype(str).str.strip().unique()
-                        unique_cats = sorted(unique_cats)  # для воспроизводимости
-                        vocab = {cat: idx for idx, cat in enumerate(unique_cats)}
-                        categorical_mappings[col] = {
-                            'classes': unique_cats,      # список категорий для выпадающего списка
-                            'vocab': vocab,              # отображение категория -> индекс
-                            'vocab_size': len(unique_cats)
-                        }
 
                 # Формируем матрицу числовых признаков X_num
                 X_num = df[numerical_cols].astype(float).values if numerical_cols else np.empty((df.shape[0], 0))
-                # Формируем список массивов категориальных признаков (каждый превращён в индексы)
-                X_cat_list = []
-                for col in categorical_cols:
-                    vocab = categorical_mappings[col]['vocab']
-                    col_data = df[col].astype(str).str.strip().map(vocab).fillna(0).astype(np.int32)
-                    X_cat_list.append(col_data.values.reshape(-1, 1))
 
                 # Целевая переменная (прочность)
                 y = df[target_col].values.reshape(-1, 1).astype(np.float32)
 
+                # ---------- ВАЖНО: РАЗДЕЛЯЕМ ДАННЫЕ ДО ВСЕХ ПРЕОБРАЗОВАНИЙ ----------
                 # Разделяем данные на обучающую (80%) и тестовую (20%) выборки
-                X_num_train, X_num_test, y_train, y_test = train_test_split(
-                    X_num, y, test_size=0.2, random_state=42
+                X_num_train, X_num_test, y_train, y_test, idx_train, idx_test = train_test_split(
+                    X_num, y, df.index, test_size=0.2, random_state=42
                 )
-                X_cat_train_list = []
-                X_cat_test_list = []
-                for cat_arr in X_cat_list:
-                    tr, te = train_test_split(cat_arr, test_size=0.2, random_state=42)
-                    X_cat_train_list.append(tr)
-                    X_cat_test_list.append(te)
 
-                # Нормализуем числовые признаки (z-масштабирование)
+                # Сохраняем индексы для последующей подсветки в интерфейсе
+                st.session_state['df_train_indices'] = idx_train.tolist()
+                st.session_state['df_test_indices'] = idx_test.tolist()
+
+                # ---------- ПОСТРОЕНИЕ VOCAB ДЛЯ КАТЕГОРИАЛЬНЫХ ПРИЗНАКОВ ТОЛЬКО НА ОБУЧАЮЩЕЙ ВЫБОРКЕ ----------
+                # Это ключевое исправление: не допускаем утечки категорий из теста
+                df_train = df.loc[idx_train]
+                for col in categorical_cols:
+                    unique_cats = df_train[col].astype(str).str.strip().unique()
+                    unique_cats = sorted(unique_cats)  # для воспроизводимости
+                    vocab = {cat: idx for idx, cat in enumerate(unique_cats)}
+                    categorical_mappings[col] = {
+                        'classes': unique_cats,
+                        'vocab': vocab,
+                        'vocab_size': len(unique_cats)
+                    }
+
+                # ---------- ПРЕОБРАЗОВАНИЕ КАТЕГОРИАЛЬНЫХ ПРИЗНАКОВ В ИНДЕКСЫ ----------
+                # Обучающая выборка
+                X_cat_train_list = []
+                for col in categorical_cols:
+                    vocab = categorical_mappings[col]['vocab']
+                    # Для обучающей выборки все категории должны быть в vocab
+                    col_data = df.loc[idx_train, col].astype(str).str.strip().map(vocab).fillna(0).astype(np.int32)
+                    X_cat_train_list.append(col_data.values.reshape(-1, 1))
+
+                # Тестовая выборка
+                X_cat_test_list = []
+                for col in categorical_cols:
+                    vocab = categorical_mappings[col]['vocab']
+                    # Для тестовой выборки неизвестные категории заменяем на 0 (первая категория)
+                    col_data = df.loc[idx_test, col].astype(str).str.strip().map(vocab).fillna(0).astype(np.int32)
+                    X_cat_test_list.append(col_data.values.reshape(-1, 1))
+
+                # Вычисляем статистики для UI-подсказок (min/max) - только на обучающей выборке
+                for col in numerical_cols:
+                    numerical_stats[col] = {
+                        'min': float(df_train[col].min()),
+                        'max': float(df_train[col].max())
+                    }
+
+                # Нормализуем числовые признаки (z-масштабирование) - fit только на train
                 scaler_x_num = StandardScaler()
                 if X_num_train.shape[1] > 0:
                     X_num_train_scaled = scaler_x_num.fit_transform(X_num_train)
@@ -226,14 +238,12 @@ with tab1:
                     X_num_train_scaled = np.empty((X_num_train.shape[0], 0))
                     X_num_test_scaled = np.empty((X_num_test.shape[0], 0))
 
-                # Нормализуем целевую переменную
+                # Нормализуем целевую переменную - fit только на train
                 scaler_y = StandardScaler()
                 y_train_scaled = scaler_y.fit_transform(y_train)
                 y_test_scaled = scaler_y.transform(y_test)
 
                 # ---------- ФИКСИРОВАННАЯ ВАЛИДАЦИОННАЯ ВЫБОРКА ----------
-                # Для воспроизводимости и стабильности создаём фиксированную валидационную выборку
-                # (20% от обучающей) вместо validation_split, который перемешивает данные каждую эпоху
                 X_num_train, X_num_val, y_train_scaled, y_val = train_test_split(
                     X_num_train_scaled, y_train_scaled, test_size=0.2, random_state=42
                 )
@@ -244,74 +254,54 @@ with tab1:
                     X_cat_train_fixed.append(tr)
                     X_cat_val_list.append(val)
 
-                # Собираем списки входов для модели: числовые + категориальные
+                # Собираем списки входов для модели
                 train_inputs_fixed = [X_num_train] + X_cat_train_fixed
                 val_inputs = [X_num_val] + X_cat_val_list
                 test_inputs = [X_num_test_scaled] + X_cat_test_list
 
-                # ---------- ПОСТРОЕНИЕ МОДЕЛИ С УЛУЧШЕННОЙ АРХИТЕКТУРОЙ ----------
-                # Вход для числовых признаков
+                # ---------- ПОСТРОЕНИЕ МОДЕЛИ ----------
                 numerical_input = Input(shape=(len(numerical_cols),), name="numerical_input")
-                # Входы для категориальных признаков (каждый отдельный Input)
                 categorical_inputs = []
                 embeddings = []
                 for col in categorical_cols:
                     vocab_size = categorical_mappings[col]['vocab_size']
-                    embed_dim = 8   # размерность плотного вектора (embedding)
+                    embed_dim = 8
                     inp = Input(shape=(1,), name=f"cat_{col}", dtype=tf.int32)
                     categorical_inputs.append(inp)
-                    # Слой Embedding: преобразует индекс категории в плотный вектор размерности embed_dim
                     emb = layers.Embedding(input_dim=vocab_size, output_dim=embed_dim, name=f"embed_{col}")(inp)
-                    # Превращаем (batch, 1, embed_dim) в (batch, embed_dim) через Flatten
                     emb = layers.Flatten()(emb)
                     embeddings.append(emb)
 
-                # Конкатенируем числовые признаки и все embedding-вектора
                 if numerical_cols:
                     all_features = Concatenate()([numerical_input] + embeddings)
                 else:
                     all_features = Concatenate()(embeddings)
 
-                # ----- БЛОК ГЛУБОКОГО ОБУЧЕНИЯ (полносвязные слои с регуляризацией) -----
-                # GaussianNoise: добавляет гауссовский шум для повышения устойчивости модели
+                # Блок глубокого обучения
                 x = GaussianNoise(0.05)(all_features)
-                # Dense 256 с ReLU – первый полносвязный слой для извлечения сложных признаков
                 x = Dense(256, activation='relu')(x)
-                # BatchNormalization: нормализует выходы слоя, ускоряет сходимость и стабилизирует обучение
                 x = BatchNormalization()(x)
-                # Dropout 0.4 – регуляризация: отключает 40% нейронов случайным образом
                 x = Dropout(0.4)(x)
-                # Dense 128 – второй полносвязный слой
                 x = Dense(128, activation='relu')(x)
                 x = BatchNormalization()(x)
-                # Dropout 0.3 – отключает 30% нейронов
                 x = Dropout(0.3)(x)
-                # Dense 64 – третий слой
                 x = Dense(64, activation='relu')(x)
                 x = BatchNormalization()(x)
-                # Dense 32 – промежуточный слой перед выходом
                 x = Dense(32, activation='relu')(x)
-                # Выходной слой: один нейрон без активации (линейный) – регрессия
                 output = Dense(1, name="output")(x)
 
-                # Создаём модель с указанием всех входов и выхода
                 model = models.Model(inputs=[numerical_input] + categorical_inputs, outputs=output)
-                # Компиляция: оптимизатор Adam, функция потерь MSE, метрика MAE
                 model.compile(optimizer='adam', loss='mse', metrics=['mae'])
 
                 # ---------- НАСТРОЙКА КОЛБЭКОВ ДЛЯ ОБУЧЕНИЯ ----------
                 total_epochs = 250
-                # ReduceLROnPlateau: уменьшает скорость обучения в 2 раза, если валидационная потеря не улучшается 15 эпох
                 reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
                     monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6
                 )
-                # EarlyStopping: останавливает обучение, если валидационная потеря не улучшается 30 эпох,
-                # и восстанавливает лучшие веса (restore_best_weights=True)
                 early_stop = tf.keras.callbacks.EarlyStopping(
                     monitor='val_loss', patience=30, restore_best_weights=True
                 )
 
-                # ----- КАСТОМНЫЙ CALLBACK ДЛЯ ПРОГРЕСС-БАРА И ТАЙМЕРА -----
                 class ProgressCallback(tf.keras.callbacks.Callback):
                     def __init__(self, total_epochs, progress_bar, status_text):
                         super().__init__()
@@ -330,12 +320,10 @@ with tab1:
                             f"val_mae: {logs.get('val_mae', 0):.4f} | Прошло: {elapsed:.1f} сек | ETA: {eta:.1f} сек"
                         )
 
-                # Инициализируем прогресс-бар и текстовое поле
                 progress_bar = st.progress(0, text="🏃 Инициализация...")
                 status_text = st.empty()
                 progress_cb = ProgressCallback(total_epochs, progress_bar, status_text)
 
-                # Запуск обучения
                 history = model.fit(
                     train_inputs_fixed, y_train_scaled,
                     validation_data=(val_inputs, y_val),
@@ -346,7 +334,6 @@ with tab1:
                     callbacks=[reduce_lr, early_stop, progress_cb]
                 )
 
-                # Сохраняем историю обучения и метаинформацию о времени и эпохах
                 elapsed_total = time.time() - progress_cb.start_time
                 actual_epochs = len(history.history['loss'])
                 status_text.success(
@@ -354,8 +341,6 @@ with tab1:
                     f"Выполнено эпох: {actual_epochs} из {total_epochs}"
                 )
                 st.session_state['history'] = history.history
-                st.session_state['actual_epochs'] = actual_epochs
-                st.session_state['training_time'] = elapsed_total
 
                 # Оценка качества на тестовой выборке
                 y_pred_scaled = model.predict(test_inputs)
@@ -374,13 +359,18 @@ with tab1:
                     'categorical_mappings': categorical_mappings,
                     'feature_cols_names': numerical_cols + categorical_cols,
                     'numerical_stats': numerical_stats,
-                    'saved_metrics': metrics
+                    'saved_metrics': metrics,
+                    'actual_epochs': actual_epochs,
+                    'training_time': elapsed_total,
+                    'df_train_indices': idx_train.tolist(),
+                    'df_test_indices': idx_test.tolist()
                 })
 
                 # Сохраняем модель и метаданные на диск
                 save_model_assets(model, scaler_x_num, scaler_y, numerical_cols,
                                   categorical_mappings, numerical_cols + categorical_cols,
-                                  numerical_stats, metrics, actual_epochs, elapsed_total)
+                                  numerical_stats, metrics, actual_epochs, elapsed_total,
+                                  idx_train.tolist(), idx_test.tolist())
                 st.sidebar.success("💾 Модель сохранена!")
 
             except Exception as e:
@@ -398,9 +388,9 @@ with tab1:
             actual_epochs = st.session_state.get('actual_epochs', '—')
             training_time = st.session_state.get('training_time', None)
             if training_time is not None:
-                st.metric("⏱️ Обучение", f"{actual_epochs} эпох", delta=f"{training_time:.1f} сек")
+                st.metric("⏱️ Обучение", f"{actual_epochs} эпохи", delta=f"{training_time:.1f} сек")
             else:
-                st.metric("⏱️ Обучение", f"{actual_epochs} эпох")
+                st.metric("⏱️ Обучение", f"{actual_epochs} эпохи")
         with col_plot:
             if 'history' in st.session_state:
                 fig, ax = plt.subplots(figsize=(8, 4))
@@ -420,18 +410,88 @@ with tab1:
 
         # Если есть загруженный датасет, предлагаем выбрать строку для автозаполнения полей
         if 'raw_df' in st.session_state:
-            st.subheader("📥 Автозаполнение параметров из строки")
-            row_idx = st.number_input(
-                "Введите индекс строки датасета",
-                min_value=0,
-                max_value=len(st.session_state['raw_df'])-1,
-                value=0
+            st.subheader("📥 Автозаполнение параметров из строки датасета")
+            df_raw = st.session_state['raw_df']
+
+            # ========== НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: ПОДСВЕТКА ТИПА СТРОКИ ==========
+            # Определяем тип строки (обучающая / тестовая) на основе сохранённых индексов
+            # Важно: проверяем, что индексы не None, иначе подставляем пустое множество
+            train_indices_data = st.session_state.get('df_train_indices')
+            test_indices_data = st.session_state.get('df_test_indices')
+            
+            # Безопасное преобразование в set: если None, то пустое множество
+            train_indices = set(train_indices_data) if train_indices_data is not None else set()
+            test_indices = set(test_indices_data) if test_indices_data is not None else set()
+
+            # ========== НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: ЧЕКБОКС ДЛЯ ФИЛЬТРАЦИИ СТРОК ==========
+            # Добавляем чекбокс, который позволяет скрыть строки из обучающей выборки
+            # При включении пользователь видит только тестовые строки (и, опционально, новые данные)
+            hide_train_rows = st.checkbox(
+                "🔍 Показывать только тестовые строки (скрыть обучающие)",
+                value=False,  # по умолчанию выключен, показываем все строки
+                help="При включении из списка будут скрыты строки из ОБУЧАЮЩЕЙ выборки. Останутся только строки из ТЕСТОВОЙ выборки и новые данные (вне датасета)."
             )
-            if st.button("Загрузить данные этой строки"):
-                st.session_state['current_inputs'] = st.session_state['raw_df'].iloc[row_idx].to_dict()
-                # Увеличиваем счётчик загрузок, чтобы обновить ключи виджетов и сбросить ручные правки
-                st.session_state['load_counter'] += 1
-                st.rerun()
+
+            # Формируем список индексов для отображения с учётом фильтрации
+            # Если чекбокс включён, показываем только тестовые и новые строки, иначе все строки
+            if hide_train_rows:
+                # Фильтруем: оставляем только строки, которые НЕ являются обучающими
+                # То есть: строки из теста (test_indices) и строки вне датасета (не в train_indices и не в test_indices)
+                display_indices = [
+                    i for i in range(len(df_raw)) 
+                    if i not in train_indices  # исключаем обучающие строки
+                ]
+            else:
+                # Показываем все строки без фильтрации
+                display_indices = list(range(len(df_raw)))
+            
+            # Формируем список с подсказками для каждой строки (только для отображаемых)
+            row_options = []
+            for i in display_indices:
+                if i in train_indices:
+                    row_options.append(f"📚 Строка {i} — [ОБУЧАЮЩАЯ ВЫБОРКА]")
+                elif i in test_indices:
+                    row_options.append(f"🧪 Строка {i} — [ТЕСТОВАЯ ВЫБОРКА]")
+                else:
+                    row_options.append(f"🆕 Строка {i} — [НОВЫЕ ДАННЫЕ (вне датасета)]")
+
+            # Если после фильтрации не осталось строк, показываем предупреждение
+            if len(display_indices) == 0:
+                st.warning("⚠️ Нет строк для отображения. Отключите фильтр или загрузите датасет.")
+                # Если нет строк, не показываем выбор и кнопку загрузки
+                selected_idx = None
+                selected_split_type = None
+                hint_message = None
+            else:
+                # Выбор строки с визуальным "человекочитаемым" отображением
+                # Используем display_indices для получения реального индекса в df_raw
+                selected_display_pos = st.selectbox(
+                    "Выберите строку для автозаполнения",
+                    options=range(len(display_indices)),
+                    format_func=lambda pos: row_options[pos]
+                )
+                # Получаем реальный индекс строки в исходном датасете
+                selected_idx = display_indices[selected_display_pos]
+
+                # Определяем тип выбранной строки для последующего использования
+                if selected_idx in train_indices:
+                    selected_split_type = "train"
+                    hint_message = "ℹ️ **Эта строка из ОБУЧАЮЩЕЙ выборки**\n\n📊 При сравнении прогноза с реальным значением:\n   • Ошибка будет **искусственно занижена**\n   • Модель могла **запомнить** этот пример\n   • Это проверка **памяти**, а не обобщающей способности"
+                elif selected_idx in test_indices:
+                    selected_split_type = "test"
+                    hint_message = "✅ **Эта строка из ТЕСТОВОЙ выборки**\n\n📊 При сравнении прогноза с реальным значением:\n   • Ошибка **реалистична** для новых данных\n   • Это проверка **обобщающей способности**\n   • Модель **не видела** этот пример при обучении"
+                else:
+                    selected_split_type = "unknown"
+                    hint_message = "🆕 **Эта строка НЕ входит в датасет**\n\n📊 Истинное значение прочности будет **неизвестно** (это новые данные)"
+
+                # Отображаем подсказку пользователю
+                st.info(hint_message)
+
+                if st.button("Загрузить данные этой строки"):
+                    st.session_state['current_inputs'] = df_raw.iloc[selected_idx].to_dict()
+                    st.session_state['loaded_row_split'] = selected_split_type   # сохраняем тип
+                    st.session_state['load_counter'] += 1
+                    st.rerun()
 
         # Форма ввода признаков для прогноза
         with st.form("prediction_form"):
@@ -461,7 +521,6 @@ with tab1:
                         # Категориальный признак: выпадающий список
                         classes = categorical_mappings[col_name]['classes']
                         help_text = f"Допустимые значения: {', '.join(classes)}"
-                        # Берём текущее значение из session_state (если было автозаполнение)
                         curr_val = st.session_state.get('current_inputs', {}).get(col_name, classes[0])
                         if curr_val not in classes:
                             curr_val = classes[0]
@@ -470,7 +529,7 @@ with tab1:
                             options=classes,
                             index=classes.index(curr_val),
                             help=help_text,
-                            key=f"cat_{col_name}_{load_counter}"   # динамический ключ для сброса
+                            key=f"cat_{col_name}_{load_counter}"
                         )
                         input_dict[col_name] = choice
                     else:
@@ -478,7 +537,7 @@ with tab1:
                         if col_name in numerical_stats:
                             min_val = numerical_stats[col_name]['min']
                             max_val = numerical_stats[col_name]['max']
-                            help_text = f"Введите числовое значение (диапазон: [{min_val:.4f}, {max_val:.4f}])"
+                            help_text = f"Введите числовое значение (диапазон по обучающей выборке: [{min_val:.4f}, {max_val:.4f}])"
                         else:
                             help_text = "Введите числовое значение"
                         default_val = float(st.session_state.get('current_inputs', {}).get(col_name, 0.0))
@@ -487,7 +546,7 @@ with tab1:
                             value=default_val,
                             format="%.4f",
                             help=help_text,
-                            key=f"num_{col_name}_{load_counter}"   # динамический ключ для сброса
+                            key=f"num_{col_name}_{load_counter}"
                         )
 
             # Кнопка отправки формы
@@ -508,14 +567,24 @@ with tab1:
                 st.info(f"### Прогноз нейросети: **{pred:.2f} МПа**")
 
                 # ----- ПРОВЕРКА НАЛИЧИЯ ВВЕДЁННОЙ КОМБИНАЦИИ В ДАТАСЕТЕ -----
+                # ========== НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: КОРРЕКТНОЕ ОТОБРАЖЕНИЕ КАЧЕСТВА ==========
                 show_comparison = False
                 actual_value = None
+                matched_split_type = None
+
                 if 'raw_df' in st.session_state:
                     df_raw = st.session_state['raw_df']
                     target_col_name = df_raw.columns[-1]
                     feature_cols_for_match = st.session_state['feature_cols_names']
+                    train_indices_data = st.session_state.get('df_train_indices')
+                    test_indices_data = st.session_state.get('df_test_indices')
+                    
+                    # Безопасное преобразование в set
+                    train_indices = set(train_indices_data) if train_indices_data is not None else set()
+                    test_indices = set(test_indices_data) if test_indices_data is not None else set()
+
                     # Ищем строку, полностью совпадающую по всем признакам (с допуском для чисел)
-                    for _, row in df_raw.iterrows():
+                    for idx, row in df_raw.iterrows():
                         match = True
                         for col in feature_cols_for_match:
                             val_from_row = row[col]
@@ -535,19 +604,42 @@ with tab1:
                         if match:
                             show_comparison = True
                             actual_value = float(row[target_col_name])
+                            # Определяем, к какой выборке относится найденная строка
+                            if idx in train_indices:
+                                matched_split_type = "train"
+                            elif idx in test_indices:
+                                matched_split_type = "test"
+                            else:
+                                matched_split_type = "unknown"
                             break
 
                 if show_comparison and actual_value is not None:
-                    # Если комбинация найдена, выводим метрики сравнения
                     abs_err = abs(pred - actual_value)
+                    rel_err_pct = (abs_err / actual_value) * 100 if actual_value != 0 else 0
+
                     c_a, c_b, c_c = st.columns(3)
                     c_a.write(f"📊 Реальное значение: **{actual_value:.2f} МПа**")
                     c_b.write(f"❌ Абсолютная ошибка: **{abs_err:.2f} МПа**")
-                    c_c.write(f"📉 Отклонение: **{(abs_err/actual_value)*100:.2f}%**")
+                    c_c.write(f"📉 Относительное отклонение: **{rel_err_pct:.2f}%**")
+
+                    # ========== НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: ПОДСВЕТКА ТИПА ВЫБОРКИ В РЕЗУЛЬТАТЕ ==========
+                    if matched_split_type == "train":
+                        st.warning("⚠️ **ВНИМАНИЕ: Это обучающая выборка!**")
+                        st.caption("Ошибка занижена — модель могла просто запомнить ответ. Данная метрика не отражает качество на новых данных.")
+                        st.metric("Справочная ошибка на обучающих данных", f"{abs_err:.2f} МПа",
+                                  delta="занижена", delta_color="off")
+                    elif matched_split_type == "test":
+                        st.info("📊 **Это тестовая выборка**")
+                        st.caption("Ошибка отражает реальное качество модели на новых, ранее не виденных данных.")
+                        st.metric("Ошибка обобщения (объективная)", f"{abs_err:.2f} МПа",
+                                  delta="реалистична", delta_color="normal")
+                    else:
+                        st.info("🆕 **Это новые данные (не из датасета)**")
+                        st.caption("Истинное значение прочности неизвестно — оценить точность прогноза невозможно.")
                 else:
                     st.warning("⚠️ Для данной комбинации значений признаков отсутствует экспериментальное значение Прочности. Метрики качества прогноза не могут быть определены!")
 
-                st.balloons()   # Эффект для визуального подтверждения расчёта
+                st.balloons()
 
 # ------------------ ВКЛАДКА ПОМОЩИ (ИНСТРУКЦИЯ) --------------------
 with tab2:
@@ -561,7 +653,11 @@ with tab2:
 
     **2. Прогнозирование**  
     - Заполните поля ввода вручную. **Справа от каждого поля есть значок «?»** – при наведении на него показывается диапазон допустимых значений (для чисел) или список доступных категорий.  
-    - Или выберите номер строки из загруженного CSV и нажмите «Загрузить данные этой строки».  
+    - Или выберите номер строки из загруженного CSV и нажмите «Загрузить данные этой строки». **Строки подсвечиваются**:  
+        - 📚 Обучающая выборка – модель их "знает", ошибка будет занижена  
+        - 🧪 Тестовая выборка – модель их не видела, ошибка объективна  
+        - 🆕 Новые данные – истинное значение неизвестно  
+    - **Новая функция:** включите чекбокс «🔍 Показывать только тестовые строки», чтобы скрыть обучающие строки из списка.  
     - Нажмите «🧪 РАССЧИТАТЬ ПРОГНОЗ».  
 
     **3. Метрики**  
@@ -654,3 +750,15 @@ with tab3:
 
     **Вывод:** Предложенная модель превосходит все рассмотренные алгоритмы по точности (R²) и абсолютной ошибке (MAE) благодаря корректной обработке категориальных признаков, глубокой архитектуре с регуляризацией и адаптивному управлению обучением.
     """)
+
+# ------------------ ВКЛАДКА АНАЛИЗ ДАННЫХ (report.html) --------------------
+with tab4:
+    st.header("📊 Разведочный анализ данных")
+    try:
+        with open("report.htm", "r", encoding="utf-8") as f:
+            html_content = f.read()
+        st.components.v1.html(html_content, height=800, scrolling=True)
+    except FileNotFoundError:
+        st.error("Файл report.htm не найден. Убедитесь, что файл находится в той же папке, что и приложение.")
+    except Exception as e:
+        st.error(f"Ошибка загрузки отчёта: {e}")
