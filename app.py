@@ -193,7 +193,7 @@ with tab1:
                 st.session_state['df_test_indices'] = idx_test.tolist()
 
                 # ---------- ПОСТРОЕНИЕ VOCAB ДЛЯ КАТЕГОРИАЛЬНЫХ ПРИЗНАКОВ ТОЛЬКО НА ОБУЧАЮЩЕЙ ВЫБОРКЕ ----------
-                # Это ключевое исправление: не допускаем утечки категорий из теста
+                # Не допускаем утечки категорий из теста
                 df_train = df.loc[idx_train]
                 for col in categorical_cols:
                     unique_cats = df_train[col].astype(str).str.strip().unique()
